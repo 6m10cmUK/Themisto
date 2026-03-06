@@ -111,7 +111,9 @@ class _TerminalScreenState extends State<TerminalScreen> {
       tab.connected = false;
       if (mounted) setState(() {});
       await _connectTab(tab);
-      tab._retryCount = 0;
+      if (tab.connected) {
+        tab._retryCount = 0;
+      }
     } finally {
       tab._reconnecting = false;
     }
@@ -200,7 +202,9 @@ class _TerminalScreenState extends State<TerminalScreen> {
     tab.session?.close();
     setState(() {
       _tabs.removeAt(index);
-      if (_currentIndex >= _tabs.length) {
+      if (index < _currentIndex) {
+        _currentIndex--;
+      } else if (_currentIndex >= _tabs.length) {
         _currentIndex = _tabs.isEmpty ? 0 : _tabs.length - 1;
       }
     });
