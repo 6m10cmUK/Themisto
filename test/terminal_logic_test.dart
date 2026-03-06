@@ -41,21 +41,13 @@ void main() {
     });
 
     test('接続成功時のみリトライカウントがリセットされる', () {
-      retryCount = 3;
-      final connected = true;
-      if (connected) {
-        retryCount = 0;
-      }
-      expect(retryCount, 0);
-    });
+      int resetIfConnected(int count, bool connected) =>
+          connected ? 0 : count;
 
-    test('接続失敗時はリトライカウントがリセットされない', () {
-      retryCount = 3;
-      final connected = false;
-      if (connected) {
-        retryCount = 0;
-      }
-      expect(retryCount, 3);
+      expect(resetIfConnected(3, true), 0);
+      expect(resetIfConnected(3, false), 3);
+      expect(resetIfConnected(5, true), 0);
+      expect(resetIfConnected(1, false), 1);
     });
   });
 
