@@ -344,9 +344,14 @@ class _TerminalScreenState extends State<TerminalScreen> {
     if (!tab.connected) {
       return const Center(child: CircularProgressIndicator());
     }
-    return Column(
+    final keyboardHeight = MediaQuery.of(context).viewInsets.bottom;
+    return Stack(
       children: [
-        Expanded(
+        Positioned(
+          top: -keyboardHeight,
+          left: 0,
+          right: 0,
+          bottom: keyboardHeight,
           child: Listener(
             behavior: HitTestBehavior.translucent,
             onPointerMove: (event) {
@@ -368,7 +373,12 @@ class _TerminalScreenState extends State<TerminalScreen> {
             ),
           ),
         ),
-        _buildAccessoryBar(),
+        Positioned(
+          left: 0,
+          right: 0,
+          bottom: keyboardHeight,
+          child: _buildAccessoryBar(),
+        ),
       ],
     );
   }
