@@ -225,6 +225,7 @@ class _TerminalScreenState extends State<TerminalScreen> {
   Widget build(BuildContext context) {
     if (_tabs.isEmpty) return const SizedBox.shrink();
     return Scaffold(
+      resizeToAvoidBottomInset: false,
       appBar: AppBar(
         toolbarHeight: 0,
         bottom: PreferredSize(
