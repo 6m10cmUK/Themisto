@@ -345,41 +345,49 @@ class _TerminalScreenState extends State<TerminalScreen> {
       return const Center(child: CircularProgressIndicator());
     }
     final keyboardHeight = MediaQuery.of(context).viewInsets.bottom;
-    return Stack(
-      children: [
-        Positioned(
-          top: -keyboardHeight,
-          left: 0,
-          right: 0,
-          bottom: keyboardHeight,
-          child: Listener(
-            behavior: HitTestBehavior.translucent,
-            onPointerMove: (event) {
-              _handleScroll(tab, -event.delta.dy);
-            },
-            onPointerSignal: (event) {
-              if (event is PointerScrollEvent) {
-                _handleScroll(tab, event.scrollDelta.dy);
-              }
-            },
-            child: TerminalView(
-              tab.terminal,
-              autofocus: true,
-              textStyle: const TerminalStyle(
-                fontFamily: 'TerminalFont',
-                fontFamilyFallback: ['TerminalFontJP'],
-                locale: Locale('ja', 'JP'),
+    const accessoryBarHeight = 44.0;
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        final terminalHeight = constraints.maxHeight - accessoryBarHeight;
+        return Stack(
+          clipBehavior: Clip.none,
+          children: [
+            Transform.translate(
+              offset: Offset(0, -keyboardHeight),
+              child: SizedBox(
+                width: constraints.maxWidth,
+                height: terminalHeight,
+                child: Listener(
+                  behavior: HitTestBehavior.translucent,
+                  onPointerMove: (event) {
+                    _handleScroll(tab, -event.delta.dy);
+                  },
+                  onPointerSignal: (event) {
+                    if (event is PointerScrollEvent) {
+                      _handleScroll(tab, event.scrollDelta.dy);
+                    }
+                  },
+                  child: TerminalView(
+                    tab.terminal,
+                    autofocus: true,
+                    textStyle: const TerminalStyle(
+                      fontFamily: 'TerminalFont',
+                      fontFamilyFallback: ['TerminalFontJP'],
+                      locale: Locale('ja', 'JP'),
+                    ),
+                  ),
+                ),
               ),
             ),
-          ),
-        ),
-        Positioned(
-          left: 0,
-          right: 0,
-          bottom: keyboardHeight,
-          child: _buildAccessoryBar(),
-        ),
-      ],
+            Positioned(
+              left: 0,
+              right: 0,
+              bottom: keyboardHeight,
+              child: _buildAccessoryBar(),
+            ),
+          ],
+        );
+      },
     );
   }
 
