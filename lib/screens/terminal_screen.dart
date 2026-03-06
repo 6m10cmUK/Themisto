@@ -60,6 +60,7 @@ class _TerminalScreenState extends State<TerminalScreen> {
     _sharedClient?.close();
     _sharedClient = null;
     await Future.delayed(const Duration(milliseconds: 500));
+    tab.scrollAccumulator = 0;
     tab.error = null;
     tab.connected = false;
     if (mounted) setState(() {});
