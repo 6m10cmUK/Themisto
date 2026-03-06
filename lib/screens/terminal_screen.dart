@@ -7,6 +7,19 @@ import 'package:xterm/xterm.dart';
 import '../models/host_config.dart';
 import '../services/ssh_service.dart';
 
+class _TerminalTab {
+  final String sessionName;
+  final Terminal terminal;
+  SSHSession? session;
+  bool connected = false;
+  String? error;
+  double scrollAccumulator = 0;
+  bool _reconnecting = false;
+
+  _TerminalTab({required this.sessionName})
+      : terminal = Terminal(maxLines: 10000);
+}
+
 class TerminalScreen extends StatefulWidget {
   final HostConfig host;
   final String sessionName;
@@ -22,137 +35,299 @@ class TerminalScreen extends StatefulWidget {
 }
 
 class _TerminalScreenState extends State<TerminalScreen> {
-  final _terminal = Terminal(maxLines: 10000);
-  SSHClient? _client;
-  SSHSession? _session;
-  bool _connected = false;
-  String? _error;
+  final List<_TerminalTab> _tabs = [];
+  int _currentIndex = 0;
   bool _ctrlHeld = false;
-  bool _manualClose = false;
+  SSHClient? _sharedClient;
+
+  _TerminalTab get _currentTab => _tabs[_currentIndex];
 
   @override
   void initState() {
     super.initState();
-    _connect();
+    _addTab(widget.sessionName);
   }
 
-  Future<void> _connect() async {
-    try {
-      final ssh = SshService();
-      _client = await ssh.connect(widget.host);
+  Future<SSHClient> _getClient() async {
+    if (_sharedClient != null) return _sharedClient!;
+    final ssh = SshService();
+    _sharedClient = await ssh.connect(widget.host);
+    return _sharedClient!;
+  }
 
-      _session = await _client!.shell(
+  void _addTab(String sessionName) {
+    final tab = _TerminalTab(sessionName: sessionName);
+    setState(() {
+      _tabs.add(tab);
+      _currentIndex = _tabs.length - 1;
+    });
+    _connectTab(tab);
+  }
+
+  Future<void> _connectTab(_TerminalTab tab) async {
+    try {
+      final client = await _getClient();
+
+      tab.session = await client.shell(
         pty: SSHPtyConfig(
-          width: _terminal.viewWidth,
-          height: _terminal.viewHeight,
+          width: tab.terminal.viewWidth,
+          height: tab.terminal.viewHeight,
         ),
       );
 
-      // Enable mouse mode and attach to tmux session with UTF-8 mode
-      _session!.write(Uint8List.fromList(
-        '${SshService.pathPrefix} && tmux set -g mouse on 2>/dev/null; tmux -u attach-session -t ${widget.sessionName}\n'
+      tab.session!.write(Uint8List.fromList(
+        '${SshService.pathPrefix} && tmux set -g mouse on 2>/dev/null; tmux -u attach-session -t ${tab.sessionName}\n'
             .codeUnits,
       ));
 
-      // SSH stdout -> terminal (UTF-8 streaming decoder handles chunk boundaries)
-      _session!.stdout
+      tab.session!.stdout
           .cast<List<int>>()
           .transform(utf8.decoder)
           .listen((data) {
-        _terminal.write(data);
+        tab.terminal.write(data);
       });
 
-      _session!.stderr
+      tab.session!.stderr
           .cast<List<int>>()
           .transform(utf8.decoder)
           .listen((data) {
-        _terminal.write(data);
+        tab.terminal.write(data);
       });
 
-      // Terminal input -> SSH stdin (UTF-8)
-      _terminal.onOutput = (data) {
-        _session?.write(Uint8List.fromList(utf8.encode(data)));
+      tab.terminal.onOutput = (data) {
+        tab.session?.write(Uint8List.fromList(utf8.encode(data)));
       };
 
-      // Terminal resize -> SSH pty resize
-      _terminal.onResize = (width, height, pixelWidth, pixelHeight) {
-        _session?.resizeTerminal(width, height);
+      tab.terminal.onResize = (width, height, pixelWidth, pixelHeight) {
+        tab.session?.resizeTerminal(width, height);
       };
 
-      // Handle session done (only auto-pop if not manually closed)
-      _session!.done.then((_) {
-        if (mounted && !_manualClose) {
-          Navigator.pop(context);
+      tab.session!.done.then((_) {
+        if (mounted) {
+          setState(() {
+            tab.connected = false;
+            tab.error = 'Connection lost';
+          });
         }
       });
 
-      setState(() => _connected = true);
+      setState(() => tab.connected = true);
     } catch (e) {
-      setState(() => _error = e.toString());
+      setState(() => tab.error = e.toString());
     }
   }
 
-  double _scrollAccumulator = 0;
+  void _closeTab(int index) {
+    if (index < 0 || index >= _tabs.length) return;
+    final tab = _tabs[index];
+    tab.session?.close();
+    setState(() {
+      _tabs.removeAt(index);
+      if (_tabs.isEmpty) {
+        Navigator.pop(context);
+        return;
+      }
+      if (_currentIndex >= _tabs.length) {
+        _currentIndex = _tabs.length - 1;
+      }
+    });
+  }
 
-  void _handleScroll(double delta) {
-    _scrollAccumulator += delta;
-    const threshold = 20.0;
-    // Send mouse wheel escape sequences (SGR mode)
-    // \x1b[<65;1;1M = wheel down, \x1b[<64;1;1M = wheel up
-    while (_scrollAccumulator >= threshold) {
-      _session?.write(Uint8List.fromList('\x1b[<65;1;1M'.codeUnits));
-      _scrollAccumulator -= threshold;
+  Future<void> _showAddTabDialog() async {
+    final ssh = SshService();
+    SSHClient? client;
+    List<String> sessions = [];
+
+    try {
+      client = await ssh.connect(widget.host);
+      final (list, _) = await ssh.listTmuxSessions(client);
+      sessions = list;
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context)
+            .showSnackBar(SnackBar(content: Text('Error: $e')));
+      }
+      return;
+    } finally {
+      client?.close();
     }
-    while (_scrollAccumulator <= -threshold) {
-      _session?.write(Uint8List.fromList('\x1b[<64;1;1M'.codeUnits));
-      _scrollAccumulator += threshold;
+
+    // Filter out already opened sessions
+    final openNames = _tabs.map((t) => t.sessionName).toSet();
+    final available = sessions.where((s) => !openNames.contains(s)).toList();
+
+    if (!mounted) return;
+
+    final selected = await showModalBottomSheet<String>(
+      context: context,
+      builder: (ctx) => Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          const Padding(
+            padding: EdgeInsets.all(16),
+            child: Text('Open session', style: TextStyle(fontSize: 18)),
+          ),
+          if (available.isEmpty)
+            const Padding(
+              padding: EdgeInsets.all(16),
+              child: Text('No other sessions available'),
+            ),
+          ...available.map((name) => ListTile(
+                leading: const Icon(Icons.terminal),
+                title: Text(name),
+                onTap: () => Navigator.pop(ctx, name),
+              )),
+          const SizedBox(height: 16),
+        ],
+      ),
+    );
+
+    if (selected != null) {
+      _addTab(selected);
+    }
+  }
+
+  void _handleScroll(_TerminalTab tab, double delta) {
+    tab.scrollAccumulator += delta;
+    const threshold = 20.0;
+    while (tab.scrollAccumulator >= threshold) {
+      tab.session?.write(Uint8List.fromList('\x1b[<65;1;1M'.codeUnits));
+      tab.scrollAccumulator -= threshold;
+    }
+    while (tab.scrollAccumulator <= -threshold) {
+      tab.session?.write(Uint8List.fromList('\x1b[<64;1;1M'.codeUnits));
+      tab.scrollAccumulator += threshold;
     }
   }
 
   @override
   void dispose() {
-    _session?.close();
-    _client?.close();
+    for (final tab in _tabs) {
+      tab.session?.close();
+    }
+    _sharedClient?.close();
     super.dispose();
   }
 
   @override
   Widget build(BuildContext context) {
+    if (_tabs.isEmpty) return const SizedBox.shrink();
     return Scaffold(
       appBar: AppBar(
-        title: Text(widget.sessionName),
-        leading: IconButton(
-          icon: const Icon(Icons.arrow_back),
-          onPressed: () {
-            _manualClose = true;
-            _session?.close();
-            _client?.close();
-            Navigator.pop(context);
-          },
+        toolbarHeight: 0,
+        bottom: PreferredSize(
+          preferredSize: const Size.fromHeight(40),
+          child: _buildTabBar(),
         ),
       ),
       body: _buildBody(),
     );
   }
 
+  Widget _buildTabBar() {
+    return SizedBox(
+      height: 40,
+      child: Row(
+        children: [
+          IconButton(
+            icon: const Icon(Icons.arrow_back, size: 20),
+            onPressed: () {
+              for (final tab in _tabs) {
+                tab.session?.close();
+              }
+              _sharedClient?.close();
+              Navigator.pop(context);
+            },
+            padding: EdgeInsets.zero,
+            constraints: const BoxConstraints(minWidth: 40),
+          ),
+          Expanded(
+            child: ListView.builder(
+              scrollDirection: Axis.horizontal,
+              itemCount: _tabs.length,
+              itemBuilder: (context, i) {
+                final tab = _tabs[i];
+                final selected = i == _currentIndex;
+                return GestureDetector(
+                  onTap: () => setState(() => _currentIndex = i),
+                  child: Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 12),
+                    alignment: Alignment.center,
+                    decoration: BoxDecoration(
+                      border: Border(
+                        bottom: BorderSide(
+                          color: selected
+                              ? Theme.of(context).colorScheme.primary
+                              : Colors.transparent,
+                          width: 2,
+                        ),
+                      ),
+                    ),
+                    child: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Text(
+                          tab.sessionName,
+                          style: TextStyle(
+                            fontSize: 13,
+                            fontWeight: selected
+                                ? FontWeight.bold
+                                : FontWeight.normal,
+                          ),
+                        ),
+                        const SizedBox(width: 4),
+                        GestureDetector(
+                          onTap: () => _closeTab(i),
+                          child: const Icon(Icons.close, size: 16),
+                        ),
+                      ],
+                    ),
+                  ),
+                );
+              },
+            ),
+          ),
+          IconButton(
+            icon: const Icon(Icons.add, size: 20),
+            onPressed: _showAddTabDialog,
+            padding: EdgeInsets.zero,
+            constraints: const BoxConstraints(minWidth: 40),
+          ),
+        ],
+      ),
+    );
+  }
+
   void _sendKey(String seq) {
-    _session?.write(Uint8List.fromList(utf8.encode(seq)));
+    _currentTab.session?.write(Uint8List.fromList(utf8.encode(seq)));
   }
 
   void _sendCtrlKey(String char) {
-    // Ctrl+A = 0x01, Ctrl+B = 0x02, etc.
     final code = char.toUpperCase().codeUnitAt(0) - 0x40;
     if (code > 0 && code < 32) {
-      _session?.write(Uint8List.fromList([code]));
+      _currentTab.session?.write(Uint8List.fromList([code]));
     }
     setState(() => _ctrlHeld = false);
   }
 
   Widget _buildBody() {
-    if (_error != null) {
-      return Center(child: Text('Error: $_error'));
+    final tab = _currentTab;
+    if (tab.error != null) {
+      // Auto-reconnect
+      if (!tab._reconnecting) {
+        tab._reconnecting = true;
+        Future.microtask(() {
+          _sharedClient?.close();
+          _sharedClient = null;
+          tab.error = null;
+          tab.connected = false;
+          tab._reconnecting = false;
+          _connectTab(tab);
+        });
+      }
+      return const Center(child: CircularProgressIndicator());
     }
-    if (!_connected) {
+    if (!tab.connected) {
       return const Center(child: CircularProgressIndicator());
     }
     return Column(
@@ -161,15 +336,15 @@ class _TerminalScreenState extends State<TerminalScreen> {
           child: Listener(
             behavior: HitTestBehavior.translucent,
             onPointerMove: (event) {
-              _handleScroll(-event.delta.dy);
+              _handleScroll(tab, -event.delta.dy);
             },
             onPointerSignal: (event) {
               if (event is PointerScrollEvent) {
-                _handleScroll(event.scrollDelta.dy);
+                _handleScroll(tab, event.scrollDelta.dy);
               }
             },
             child: TerminalView(
-              _terminal,
+              tab.terminal,
               autofocus: true,
               textStyle: const TerminalStyle(
                 fontFamily: 'TerminalFont',
@@ -206,17 +381,7 @@ class _TerminalScreenState extends State<TerminalScreen> {
               _keyButton('←', () => _sendKey('\x1b[D')),
               _keyButton('→', () => _sendKey('\x1b[C')),
               _divider(),
-              _keyButton('Shift', () {
-                // Shift is handled by the OS keyboard
-              }),
-              _keyButton('Cmd', () {
-                // Cmd modifier - no direct terminal equivalent
-              }),
-              _keyButton('Opt', () {
-                // Alt/Option - send ESC prefix for next key
-                _sendKey('\x1b');
-              }),
-              _divider(),
+              _keyButton('Opt', () => _sendKey('\x1b')),
               _keyButton('BS', () => _sendKey('\x7f')),
               _keyButton('Enter', () => _sendKey('\r')),
               _divider(),
