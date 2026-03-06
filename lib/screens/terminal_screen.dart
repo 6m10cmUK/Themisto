@@ -39,7 +39,6 @@ class _TerminalScreenState extends State<TerminalScreen> {
   int _currentIndex = 0;
   bool _ctrlHeld = false;
   SSHClient? _sharedClient;
-
   _TerminalTab get _currentTab => _tabs[_currentIndex];
 
   @override
@@ -53,6 +52,19 @@ class _TerminalScreenState extends State<TerminalScreen> {
     final ssh = SshService();
     _sharedClient = await ssh.connect(widget.host);
     return _sharedClient!;
+  }
+
+  Future<void> _reconnectTab(_TerminalTab tab) async {
+    if (tab._reconnecting) return;
+    tab._reconnecting = true;
+    _sharedClient?.close();
+    _sharedClient = null;
+    await Future.delayed(const Duration(milliseconds: 500));
+    tab.error = null;
+    tab.connected = false;
+    if (mounted) setState(() {});
+    await _connectTab(tab);
+    tab._reconnecting = false;
   }
 
   void _addTab(String sessionName) {
@@ -313,19 +325,19 @@ class _TerminalScreenState extends State<TerminalScreen> {
   Widget _buildBody() {
     final tab = _currentTab;
     if (tab.error != null) {
-      // Auto-reconnect
       if (!tab._reconnecting) {
-        tab._reconnecting = true;
-        Future.microtask(() {
-          _sharedClient?.close();
-          _sharedClient = null;
-          tab.error = null;
-          tab.connected = false;
-          tab._reconnecting = false;
-          _connectTab(tab);
-        });
+        Future.microtask(() => _reconnectTab(tab));
       }
-      return const Center(child: CircularProgressIndicator());
+      return const Center(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            CircularProgressIndicator(),
+            SizedBox(height: 16),
+            Text('再接続中...', style: TextStyle(color: Colors.white70)),
+          ],
+        ),
+      );
     }
     if (!tab.connected) {
       return const Center(child: CircularProgressIndicator());
