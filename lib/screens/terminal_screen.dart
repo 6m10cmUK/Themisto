@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:typed_data';
 import 'package:flutter/gestures.dart';
@@ -7,6 +8,13 @@ import 'package:xterm/xterm.dart';
 import '../models/host_config.dart';
 import '../services/ssh_service.dart';
 
+const _kScrollThreshold = 20.0;
+const _kSgrMouseUp = '\x1b[<65;1;1M';
+const _kSgrMouseDown = '\x1b[<64;1;1M';
+const _kMaxLines = 10000;
+final _kSessionNamePattern = RegExp(r'^[a-zA-Z0-9_-]+$');
+const _kPointerMoveMinDistance = 5.0;
+
 class _TerminalTab {
   final String sessionName;
   final Terminal terminal;
@@ -15,9 +23,12 @@ class _TerminalTab {
   String? error;
   double scrollAccumulator = 0;
   bool _reconnecting = false;
+  int _retryCount = 0;
+  List<StreamSubscription> subscriptions = [];
+  Offset? _lastPointerPosition;
 
   _TerminalTab({required this.sessionName})
-      : terminal = Terminal(maxLines: 10000);
+      : terminal = Terminal(maxLines: _kMaxLines);
 }
 
 class TerminalScreen extends StatefulWidget {
@@ -39,6 +50,7 @@ class _TerminalScreenState extends State<TerminalScreen> {
   int _currentIndex = 0;
   bool _ctrlHeld = false;
   SSHClient? _sharedClient;
+  Completer<SSHClient>? _connectingClient;
   _TerminalTab get _currentTab => _tabs[_currentIndex];
 
   @override
@@ -48,27 +60,72 @@ class _TerminalScreenState extends State<TerminalScreen> {
   }
 
   Future<SSHClient> _getClient() async {
-    if (_sharedClient != null) return _sharedClient!;
-    final ssh = SshService();
-    _sharedClient = await ssh.connect(widget.host);
-    return _sharedClient!;
+    if (_sharedClient != null && !_sharedClient!.isClosed) {
+      return _sharedClient!;
+    }
+    if (_sharedClient != null && _sharedClient!.isClosed) {
+      _sharedClient = null;
+    }
+    if (_connectingClient != null) {
+      return _connectingClient!.future;
+    }
+    _connectingClient = Completer<SSHClient>();
+    try {
+      final ssh = SshService();
+      final client = await ssh.connect(widget.host);
+      _sharedClient = client;
+      _connectingClient!.complete(client);
+      return client;
+    } catch (e) {
+      _connectingClient!.completeError(e);
+      rethrow;
+    } finally {
+      _connectingClient = null;
+    }
   }
 
   Future<void> _reconnectTab(_TerminalTab tab) async {
     if (tab._reconnecting) return;
     tab._reconnecting = true;
-    _sharedClient?.close();
-    _sharedClient = null;
-    await Future.delayed(const Duration(milliseconds: 500));
-    tab.scrollAccumulator = 0;
-    tab.error = null;
-    tab.connected = false;
-    if (mounted) setState(() {});
-    await _connectTab(tab);
-    tab._reconnecting = false;
+    tab._retryCount++;
+    if (tab._retryCount > 5) {
+      tab._reconnecting = false;
+      if (mounted) {
+        setState(() {
+          tab.error = '再接続に失敗した（5回リトライ済み）';
+        });
+      }
+      return;
+    }
+    try {
+      final backoff = Duration(seconds: tab._retryCount.clamp(1, 5));
+      await Future.delayed(backoff);
+      for (final sub in tab.subscriptions) {
+        sub.cancel();
+      }
+      tab.subscriptions.clear();
+      tab.session?.close();
+      tab.session = null;
+      tab.scrollAccumulator = 0;
+      tab.error = null;
+      tab.connected = false;
+      if (mounted) setState(() {});
+      await _connectTab(tab);
+      if (tab.connected) {
+        tab._retryCount = 0;
+      }
+    } finally {
+      tab._reconnecting = false;
+    }
   }
 
   void _addTab(String sessionName) {
+    if (!_kSessionNamePattern.hasMatch(sessionName)) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('無効なセッション名')),
+      );
+      return;
+    }
     final tab = _TerminalTab(sessionName: sessionName);
     setState(() {
       _tabs.add(tab);
@@ -93,19 +150,23 @@ class _TerminalScreenState extends State<TerminalScreen> {
             .codeUnits,
       ));
 
-      tab.session!.stdout
-          .cast<List<int>>()
-          .transform(utf8.decoder)
-          .listen((data) {
-        tab.terminal.write(data);
-      });
+      tab.subscriptions.add(
+        tab.session!.stdout
+            .cast<List<int>>()
+            .transform(utf8.decoder)
+            .listen((data) {
+          tab.terminal.write(data);
+        }),
+      );
 
-      tab.session!.stderr
-          .cast<List<int>>()
-          .transform(utf8.decoder)
-          .listen((data) {
-        tab.terminal.write(data);
-      });
+      tab.subscriptions.add(
+        tab.session!.stderr
+            .cast<List<int>>()
+            .transform(utf8.decoder)
+            .listen((data) {
+          tab.terminal.write(data);
+        }),
+      );
 
       tab.terminal.onOutput = (data) {
         tab.session?.write(Uint8List.fromList(utf8.encode(data)));
@@ -121,6 +182,7 @@ class _TerminalScreenState extends State<TerminalScreen> {
             tab.connected = false;
             tab.error = 'Connection lost';
           });
+          _reconnectTab(tab);
         }
       });
 
@@ -133,26 +195,32 @@ class _TerminalScreenState extends State<TerminalScreen> {
   void _closeTab(int index) {
     if (index < 0 || index >= _tabs.length) return;
     final tab = _tabs[index];
+    for (final sub in tab.subscriptions) {
+      sub.cancel();
+    }
+    tab.subscriptions.clear();
     tab.session?.close();
     setState(() {
       _tabs.removeAt(index);
-      if (_tabs.isEmpty) {
-        Navigator.pop(context);
-        return;
-      }
-      if (_currentIndex >= _tabs.length) {
-        _currentIndex = _tabs.length - 1;
+      if (index < _currentIndex) {
+        _currentIndex--;
+      } else if (_currentIndex >= _tabs.length) {
+        _currentIndex = _tabs.isEmpty ? 0 : _tabs.length - 1;
       }
     });
+    if (_tabs.isEmpty) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted) Navigator.pop(context);
+      });
+    }
   }
 
   Future<void> _showAddTabDialog() async {
     final ssh = SshService();
-    SSHClient? client;
     List<String> sessions = [];
 
     try {
-      client = await ssh.connect(widget.host);
+      final client = await _getClient();
       final (list, _) = await ssh.listTmuxSessions(client);
       sessions = list;
     } catch (e) {
@@ -161,8 +229,6 @@ class _TerminalScreenState extends State<TerminalScreen> {
             .showSnackBar(SnackBar(content: Text('Error: $e')));
       }
       return;
-    } finally {
-      client?.close();
     }
 
     // Filter out already opened sessions
@@ -202,20 +268,23 @@ class _TerminalScreenState extends State<TerminalScreen> {
 
   void _handleScroll(_TerminalTab tab, double delta) {
     tab.scrollAccumulator += delta;
-    const threshold = 20.0;
-    while (tab.scrollAccumulator >= threshold) {
-      tab.session?.write(Uint8List.fromList('\x1b[<65;1;1M'.codeUnits));
-      tab.scrollAccumulator -= threshold;
+    while (tab.scrollAccumulator >= _kScrollThreshold) {
+      tab.session?.write(Uint8List.fromList(_kSgrMouseUp.codeUnits));
+      tab.scrollAccumulator -= _kScrollThreshold;
     }
-    while (tab.scrollAccumulator <= -threshold) {
-      tab.session?.write(Uint8List.fromList('\x1b[<64;1;1M'.codeUnits));
-      tab.scrollAccumulator += threshold;
+    while (tab.scrollAccumulator <= -_kScrollThreshold) {
+      tab.session?.write(Uint8List.fromList(_kSgrMouseDown.codeUnits));
+      tab.scrollAccumulator += _kScrollThreshold;
     }
   }
 
   @override
   void dispose() {
     for (final tab in _tabs) {
+      for (final sub in tab.subscriptions) {
+        sub.cancel();
+      }
+      tab.subscriptions.clear();
       tab.session?.close();
     }
     _sharedClient?.close();
@@ -290,9 +359,15 @@ class _TerminalScreenState extends State<TerminalScreen> {
                           ),
                         ),
                         const SizedBox(width: 4),
-                        GestureDetector(
-                          onTap: () => _closeTab(i),
-                          child: const Icon(Icons.close, size: 16),
+                        SizedBox(
+                          width: 32,
+                          height: 32,
+                          child: GestureDetector(
+                            onTap: () => _closeTab(i),
+                            child: const Center(
+                              child: Icon(Icons.close, size: 16),
+                            ),
+                          ),
                         ),
                       ],
                     ),
@@ -313,10 +388,12 @@ class _TerminalScreenState extends State<TerminalScreen> {
   }
 
   void _sendKey(String seq) {
+    if (_tabs.isEmpty) return;
     _currentTab.session?.write(Uint8List.fromList(utf8.encode(seq)));
   }
 
   void _sendCtrlKey(String char) {
+    if (_tabs.isEmpty) return;
     final code = char.toUpperCase().codeUnitAt(0) - 0x40;
     if (code > 0 && code < 32) {
       _currentTab.session?.write(Uint8List.fromList([code]));
@@ -327,16 +404,31 @@ class _TerminalScreenState extends State<TerminalScreen> {
   Widget _buildBody() {
     final tab = _currentTab;
     if (tab.error != null) {
-      if (!tab._reconnecting) {
-        Future.microtask(() => _reconnectTab(tab));
+      if (tab._reconnecting) {
+        return const Center(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              CircularProgressIndicator(),
+              SizedBox(height: 16),
+              Text('再接続中...', style: TextStyle(color: Colors.white70)),
+            ],
+          ),
+        );
       }
-      return const Center(
+      return Center(
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
-            CircularProgressIndicator(),
-            SizedBox(height: 16),
-            Text('再接続中...', style: TextStyle(color: Colors.white70)),
+            Text(tab.error!, style: const TextStyle(color: Colors.white70)),
+            const SizedBox(height: 16),
+            ElevatedButton(
+              onPressed: () {
+                tab._retryCount = 0;
+                _reconnectTab(tab);
+              },
+              child: const Text('再試行'),
+            ),
           ],
         ),
       );
@@ -352,8 +444,22 @@ class _TerminalScreenState extends State<TerminalScreen> {
           Expanded(
             child: Listener(
               behavior: HitTestBehavior.translucent,
+              onPointerDown: (event) {
+                tab._lastPointerPosition = event.position;
+              },
               onPointerMove: (event) {
+                if (tab._lastPointerPosition == null) return;
+                final diff = event.position - tab._lastPointerPosition!;
+                if (diff.dy.abs() < _kPointerMoveMinDistance) return;
+                if (diff.dx.abs() > diff.dy.abs()) return;
                 _handleScroll(tab, -event.delta.dy);
+                tab._lastPointerPosition = event.position;
+              },
+              onPointerUp: (_) {
+                tab._lastPointerPosition = null;
+              },
+              onPointerCancel: (_) {
+                tab._lastPointerPosition = null;
               },
               onPointerSignal: (event) {
                 if (event is PointerScrollEvent) {
