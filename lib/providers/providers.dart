@@ -33,7 +33,7 @@ class HostListNotifier extends AsyncNotifier<List<HostConfig>> {
 final selectedHostProvider = StateProvider<HostConfig?>((ref) => null);
 
 final tmuxSessionsProvider =
-    FutureProvider.family<List<String>, HostConfig>((ref, host) async {
+    FutureProvider.family<(List<String>, String), HostConfig>((ref, host) async {
   final ssh = ref.read(sshServiceProvider);
   final client = await ssh.connect(host);
   try {

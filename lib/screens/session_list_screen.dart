@@ -2,7 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../models/host_config.dart';
 import '../providers/providers.dart';
-
+import 'terminal_screen.dart';
 
 class SessionListScreen extends ConsumerStatefulWidget {
   final HostConfig host;
@@ -14,6 +14,7 @@ class SessionListScreen extends ConsumerStatefulWidget {
 
 class _SessionListScreenState extends ConsumerState<SessionListScreen> {
   List<String>? _sessions;
+  String? _rawOutput;
   bool _loading = true;
   String? _error;
 
@@ -32,9 +33,10 @@ class _SessionListScreenState extends ConsumerState<SessionListScreen> {
       final ssh = ref.read(sshServiceProvider);
       final client = await ssh.connect(widget.host);
       try {
-        final sessions = await ssh.listTmuxSessions(client);
+        final (sessions, raw) = await ssh.listTmuxSessions(client);
         setState(() {
           _sessions = sessions;
+          _rawOutput = raw;
           _loading = false;
         });
       } finally {
@@ -165,7 +167,7 @@ class _SessionListScreenState extends ConsumerState<SessionListScreen> {
     }
     final sessions = _sessions ?? [];
     if (sessions.isEmpty) {
-      return const Center(child: Text('No tmux sessions.\nTap + to create one.'));
+      return Center(child: Text('No tmux sessions.\n\nDebug output:\n${_rawOutput ?? "empty"}'));
     }
     return ListView.builder(
       itemCount: sessions.length,
@@ -174,23 +176,18 @@ class _SessionListScreenState extends ConsumerState<SessionListScreen> {
         return ListTile(
           title: Text(name),
           leading: const Icon(Icons.terminal),
-          trailing: Row(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              IconButton(
-                icon: const Icon(Icons.open_in_new),
-                tooltip: 'Attach (Step 2)',
-                onPressed: () {
-                  ScaffoldMessenger.of(context).showSnackBar(
-                    const SnackBar(content: Text('Terminal will be available in Step 2')),
-                  );
-                },
+          onTap: () => Navigator.push(
+            context,
+            MaterialPageRoute(
+              builder: (_) => TerminalScreen(
+                host: widget.host,
+                sessionName: name,
               ),
-              IconButton(
-                icon: const Icon(Icons.delete),
-                onPressed: () => _killSession(name),
-              ),
-            ],
+            ),
+          ),
+          trailing: IconButton(
+            icon: const Icon(Icons.delete),
+            onPressed: () => _killSession(name),
           ),
         );
       },

@@ -18,6 +18,7 @@ class ThemistoApp extends StatelessWidget {
         useMaterial3: true,
         brightness: Brightness.dark,
       ),
+      locale: const Locale('ja', 'JP'),
       home: const HostListScreen(),
     );
   }
