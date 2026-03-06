@@ -21,7 +21,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: subosio/flutter-action@v2
+      - uses: subosito/flutter-action@v2
         with:
           flutter-version-file: pubspec.yaml
           channel: stable
