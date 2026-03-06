@@ -1,0 +1,14 @@
+language: ja
+
+reviews:
+  auto_review:
+    enabled: true
+  path_filters:
+    - "!build/**"
+    - "!.dart_tool/**"
+    - "!.flutter-plugins"
+    - "!.flutter-plugins-dependencies"
+    - "!**/*.g.dart"
+    - "!**/*.freezed.dart"
+    - "!**/*.mocks.dart"
+    - "!pubspec.lock"
