@@ -4,12 +4,14 @@ on:
   push:
     branches:
       - main
+      - master
       - develop
       - 'refactor/**'
       - 'feature/**'
   pull_request:
     branches:
       - main
+      - master
       - develop
 
 jobs:
@@ -19,7 +21,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: subosushi/flutter-action@v2
+      - uses: subosio/flutter-action@v2
         with:
           flutter-version-file: pubspec.yaml
           channel: stable
