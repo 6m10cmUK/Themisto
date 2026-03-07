@@ -1,12 +1,17 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:typed_data';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:dartssh2/dartssh2.dart';
 import 'package:xterm/xterm.dart';
 import '../models/host_config.dart';
 import '../services/ssh_service.dart';
+
+final _isDesktop = defaultTargetPlatform == TargetPlatform.windows ||
+    defaultTargetPlatform == TargetPlatform.macOS ||
+    defaultTargetPlatform == TargetPlatform.linux;
 
 const _kScrollThreshold = 20.0;
 const _kSgrMouseUp = '\x1b[<65;1;1M';
@@ -436,47 +441,52 @@ class _TerminalScreenState extends State<TerminalScreen> {
     if (!tab.connected) {
       return const Center(child: CircularProgressIndicator());
     }
+    final terminalView = Listener(
+      behavior: HitTestBehavior.translucent,
+      onPointerDown: (event) {
+        tab._lastPointerPosition = event.position;
+      },
+      onPointerMove: (event) {
+        if (tab._lastPointerPosition == null) return;
+        final diff = event.position - tab._lastPointerPosition!;
+        if (diff.dy.abs() < _kPointerMoveMinDistance) return;
+        if (diff.dx.abs() > diff.dy.abs()) return;
+        _handleScroll(tab, -event.delta.dy);
+        tab._lastPointerPosition = event.position;
+      },
+      onPointerUp: (_) {
+        tab._lastPointerPosition = null;
+      },
+      onPointerCancel: (_) {
+        tab._lastPointerPosition = null;
+      },
+      onPointerSignal: (event) {
+        if (event is PointerScrollEvent) {
+          _handleScroll(tab, event.scrollDelta.dy);
+        }
+      },
+      child: TerminalView(
+        tab.terminal,
+        autofocus: true,
+        hardwareKeyboardOnly: _isDesktop,
+        textStyle: const TerminalStyle(
+          fontFamily: 'TerminalFont',
+          fontFamilyFallback: ['TerminalFontJP'],
+          locale: Locale('ja', 'JP'),
+        ),
+      ),
+    );
+
+    if (_isDesktop) {
+      return terminalView;
+    }
+
     final keyboardHeight = MediaQuery.of(context).viewInsets.bottom;
     return Transform.translate(
       offset: Offset(0, -keyboardHeight),
       child: Column(
         children: [
-          Expanded(
-            child: Listener(
-              behavior: HitTestBehavior.translucent,
-              onPointerDown: (event) {
-                tab._lastPointerPosition = event.position;
-              },
-              onPointerMove: (event) {
-                if (tab._lastPointerPosition == null) return;
-                final diff = event.position - tab._lastPointerPosition!;
-                if (diff.dy.abs() < _kPointerMoveMinDistance) return;
-                if (diff.dx.abs() > diff.dy.abs()) return;
-                _handleScroll(tab, -event.delta.dy);
-                tab._lastPointerPosition = event.position;
-              },
-              onPointerUp: (_) {
-                tab._lastPointerPosition = null;
-              },
-              onPointerCancel: (_) {
-                tab._lastPointerPosition = null;
-              },
-              onPointerSignal: (event) {
-                if (event is PointerScrollEvent) {
-                  _handleScroll(tab, event.scrollDelta.dy);
-                }
-              },
-              child: TerminalView(
-                tab.terminal,
-                autofocus: true,
-                textStyle: const TerminalStyle(
-                  fontFamily: 'TerminalFont',
-                  fontFamilyFallback: ['TerminalFontJP'],
-                  locale: Locale('ja', 'JP'),
-                ),
-              ),
-            ),
-          ),
+          Expanded(child: terminalView),
           _buildAccessoryBar(),
         ],
       ),
