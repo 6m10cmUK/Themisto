@@ -87,13 +87,19 @@ class _TerminalScreenState extends State<TerminalScreen>
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
     if (state == AppLifecycleState.resumed) {
-      // アプリがフォアグラウンドに戻った時、切断されたタブを再接続
+      // 共有クライアントが死んでたらリセット
+      if (_sharedClient != null && _sharedClient!.isClosed) {
+        _sharedClient = null;
+      }
+      // 切断されたタブを再接続（エラー状態含む）
       for (final tab in _tabs) {
-        if (!tab.connected && !tab._reconnecting) {
+        if ((!tab.connected || tab.error != null) && !tab._reconnecting) {
           tab._retryCount = 0;
+          tab.error = null;
           _reconnectTab(tab);
         }
       }
+      if (mounted) setState(() {});
     }
   }
 
