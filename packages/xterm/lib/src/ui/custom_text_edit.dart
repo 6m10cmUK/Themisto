@@ -2,6 +2,11 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
+final _isDesktopPlatform = !kIsWeb &&
+    (defaultTargetPlatform == TargetPlatform.windows ||
+        defaultTargetPlatform == TargetPlatform.macOS ||
+        defaultTargetPlatform == TargetPlatform.linux);
+
 class CustomTextEdit extends StatefulWidget {
   CustomTextEdit({
     super.key,
@@ -134,11 +139,24 @@ class CustomTextEditState extends State<CustomTextEdit> with TextInputClient {
   }
 
   KeyEventResult _onKeyEvent(FocusNode focusNode, KeyEvent event) {
-    if (_currentEditingState.composing.isCollapsed) {
-      return widget.onKeyEvent(focusNode, event);
+    if (!_currentEditingState.composing.isCollapsed) {
+      return KeyEventResult.skipRemainingHandlers;
     }
 
-    return KeyEventResult.skipRemainingHandlers;
+    // On desktop, let printable character keys (without Ctrl/Alt) pass
+    // through to the TextInput channel so IME can process them.
+    if (_isDesktopPlatform &&
+        hasInputConnection &&
+        event is KeyDownEvent &&
+        !HardwareKeyboard.instance.isControlPressed &&
+        !HardwareKeyboard.instance.isAltPressed) {
+      final char = event.character;
+      if (char != null && char.isNotEmpty && char.codeUnitAt(0) >= 0x20) {
+        return KeyEventResult.ignored;
+      }
+    }
+
+    return widget.onKeyEvent(focusNode, event);
   }
 
   void _openOrCloseInputConnectionIfNeeded() {

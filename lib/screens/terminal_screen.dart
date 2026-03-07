@@ -501,6 +501,7 @@ class _TerminalScreenState extends State<TerminalScreen> {
         tab.terminal,
         autofocus: true,
         deleteDetection: !_isDesktop,
+        keyboardType: TextInputType.text,
         textStyle: const TerminalStyle(
           fontFamily: 'TerminalFont',
           fontFamilyFallback: ['TerminalFontJP'],
