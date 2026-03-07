@@ -4,6 +4,7 @@ import 'dart:typed_data';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:dartssh2/dartssh2.dart';
 import 'package:xterm/xterm.dart';
 import '../models/host_config.dart';
@@ -24,6 +25,7 @@ const _kPointerMoveMinDistance = 5.0;
 class _TerminalTab {
   final String sessionName;
   final Terminal terminal;
+  final TerminalController controller;
   SSHSession? session;
   bool connected = false;
   String? error;
@@ -34,7 +36,8 @@ class _TerminalTab {
   Offset? _lastPointerPosition;
 
   _TerminalTab({required this.sessionName})
-      : terminal = Terminal(maxLines: _kMaxLines);
+      : terminal = Terminal(maxLines: _kMaxLines),
+        controller = TerminalController();
 }
 
 class TerminalScreen extends StatefulWidget {
@@ -421,6 +424,32 @@ class _TerminalScreenState extends State<TerminalScreen> {
     );
   }
 
+  void _copySelection() {
+    if (_tabs.isEmpty) return;
+    final range = _currentTab.controller.selection;
+    if (range == null) return;
+    final text = _currentTab.terminal.buffer.getText(range);
+    if (text.isNotEmpty) {
+      Clipboard.setData(ClipboardData(text: text));
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('コピーしました'),
+          duration: Duration(seconds: 1),
+        ),
+      );
+    }
+  }
+
+  void _pasteClipboard() async {
+    if (_tabs.isEmpty) return;
+    final data = await Clipboard.getData(Clipboard.kTextPlain);
+    if (data?.text != null && data!.text!.isNotEmpty) {
+      _currentTab.session?.write(
+        Uint8List.fromList(utf8.encode(data.text!)),
+      );
+    }
+  }
+
   void _sendKey(String seq) {
     if (_tabs.isEmpty) return;
     _currentTab.session?.write(Uint8List.fromList(utf8.encode(seq)));
@@ -499,6 +528,7 @@ class _TerminalScreenState extends State<TerminalScreen> {
       },
       child: TerminalView(
         tab.terminal,
+        controller: tab.controller,
         autofocus: true,
         deleteDetection: !_isDesktop,
         keyboardType: TextInputType.text,
@@ -574,6 +604,9 @@ class _TerminalScreenState extends State<TerminalScreen> {
               _keyButton('C-c', () => _sendCtrlKey('c')),
               _keyButton('C-d', () => _sendCtrlKey('d')),
               _keyButton('C-z', () => _sendCtrlKey('z')),
+              _divider(),
+              _keyButton('Copy', _copySelection),
+              _keyButton('Paste', _pasteClipboard),
             ],
           ),
         ),
