@@ -147,6 +147,10 @@ class _TerminalScreenState extends State<TerminalScreen>
       tab.scrollAccumulator = 0;
       tab.error = null;
       tab.connected = false;
+      // 共有クライアントが閉じていたらリセット
+      if (_sharedClient != null && _sharedClient!.isClosed) {
+        _sharedClient = null;
+      }
       if (mounted) setState(() {});
       await _connectTab(tab);
       if (tab.connected) {
