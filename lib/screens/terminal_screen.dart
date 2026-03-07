@@ -36,6 +36,8 @@ class _TerminalTab {
   List<StreamSubscription> subscriptions = [];
   Offset? _lastPointerPosition;
 
+  final FocusNode focusNode = FocusNode();
+
   _TerminalTab({required this.sessionName})
       : terminal = Terminal(maxLines: _kMaxLines),
         controller = TerminalController();
@@ -275,6 +277,7 @@ class _TerminalScreenState extends State<TerminalScreen>
     }
     tab.subscriptions.clear();
     tab.session?.close();
+    tab.focusNode.dispose();
     setState(() {
       _splitController?.removeTabFromAll(index);
       _tabs.removeAt(index);
@@ -366,6 +369,7 @@ class _TerminalScreenState extends State<TerminalScreen>
       }
       tab.subscriptions.clear();
       tab.session?.close();
+      tab.focusNode.dispose();
     }
     _sharedClient?.close();
     super.dispose();
@@ -605,6 +609,7 @@ class _TerminalScreenState extends State<TerminalScreen>
       child: TerminalView(
         tab.terminal,
         controller: tab.controller,
+        focusNode: tab.focusNode,
         autofocus: true,
         deleteDetection: !_isDesktop,
         keyboardType: _isDesktop ? TextInputType.text : TextInputType.emailAddress,
@@ -654,23 +659,62 @@ class _TerminalScreenState extends State<TerminalScreen>
       color: Theme.of(context).colorScheme.surfaceContainerHighest,
       child: SafeArea(
         top: false,
-        child: SingleChildScrollView(
-          scrollDirection: Axis.horizontal,
-          child: Row(
-            children: [
-              _keyButton('Esc', () => _sendKey('\x1b')),
-              _divider(),
-              _keyButton('↑', () => _sendKey('\x1b[A')),
-              _keyButton('↓', () => _sendKey('\x1b[B')),
-              _keyButton('←', () => _sendKey('\x1b[D')),
-              _keyButton('→', () => _sendKey('\x1b[C')),
-              _divider(),
-              _keyButton('Enter', () => _sendKey('\r')),
-              _divider(),
-              _keyButton('Copy', _copySelection),
-              _keyButton('Paste', _pasteClipboard),
-            ],
-          ),
+        child: Row(
+          children: [
+            Expanded(
+              child: SingleChildScrollView(
+                scrollDirection: Axis.horizontal,
+                child: Row(
+                  children: [
+                    _keyButton('Esc', () => _sendKey('\x1b')),
+                    _divider(),
+                    _keyButton('↑', () => _sendKey('\x1b[A')),
+                    _keyButton('↓', () => _sendKey('\x1b[B')),
+                    _keyButton('←', () => _sendKey('\x1b[D')),
+                    _keyButton('→', () => _sendKey('\x1b[C')),
+                    _divider(),
+                    _keyButton('Enter', () => _sendKey('\r')),
+                    _divider(),
+                    _keyButton('Copy', _copySelection),
+                    _keyButton('Paste', _pasteClipboard),
+                  ],
+                ),
+              ),
+            ),
+            _divider(),
+            Builder(builder: (context) {
+              final keyboardVisible = MediaQuery.of(context).viewInsets.bottom > 0;
+              return Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 2, vertical: 4),
+                child: Material(
+                  color: Theme.of(context).colorScheme.surfaceContainerHigh,
+                  borderRadius: BorderRadius.circular(6),
+                  child: InkWell(
+                    borderRadius: BorderRadius.circular(6),
+                    onTap: () {
+                      if (keyboardVisible) {
+                        FocusScope.of(context).unfocus();
+                      } else {
+                        // Re-focus the terminal to open the keyboard
+                        final tab = _tabs[_currentIndex];
+                        tab.focusNode.requestFocus();
+                      }
+                    },
+                    child: Container(
+                      constraints: const BoxConstraints(minWidth: 40, minHeight: 36),
+                      alignment: Alignment.center,
+                      child: Icon(
+                        keyboardVisible ? Icons.keyboard_hide : Icons.keyboard,
+                        size: 18,
+                        color: Theme.of(context).colorScheme.onSurface,
+                      ),
+                    ),
+                  ),
+                ),
+              );
+            }),
+            const SizedBox(width: 2),
+          ],
         ),
       ),
     );
