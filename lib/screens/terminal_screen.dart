@@ -246,6 +246,27 @@ class _TerminalScreenState extends State<TerminalScreen>
     }
   }
 
+  void _reloadTab(int index) {
+    if (index < 0 || index >= _tabs.length) return;
+    final tab = _tabs[index];
+    for (final sub in tab.subscriptions) {
+      sub.cancel();
+    }
+    tab.subscriptions.clear();
+    tab.session?.close();
+    tab.session = null;
+    tab.error = null;
+    tab.connected = false;
+    tab._retryCount = 0;
+    tab._reconnecting = false;
+    tab.scrollAccumulator = 0;
+    if (_sharedClient != null && _sharedClient!.isClosed) {
+      _sharedClient = null;
+    }
+    setState(() {});
+    _connectTab(tab);
+  }
+
   void _closeTab(int index) {
     if (index < 0 || index >= _tabs.length) return;
     final tab = _tabs[index];
@@ -418,6 +439,16 @@ class _TerminalScreenState extends State<TerminalScreen>
                           ),
                         ),
                         const SizedBox(width: 4),
+                        SizedBox(
+                          width: 32,
+                          height: 32,
+                          child: GestureDetector(
+                            onTap: () => _reloadTab(i),
+                            child: const Center(
+                              child: Icon(Icons.refresh, size: 16),
+                            ),
+                          ),
+                        ),
                         SizedBox(
                           width: 32,
                           height: 32,
