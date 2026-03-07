@@ -416,6 +416,18 @@ class TerminalViewState extends State<TerminalView> {
       return KeyEventResult.ignored;
     }
 
+    final isModified = HardwareKeyboard.instance.isControlPressed ||
+        HardwareKeyboard.instance.isAltPressed;
+
+    // On desktop with TextInput (not hardwareKeyboardOnly), let printable
+    // character keys without modifiers pass through to TextInput/IME.
+    if (!widget.hardwareKeyboardOnly &&
+        !isModified &&
+        event.character != null &&
+        event.character!.isNotEmpty) {
+      return KeyEventResult.ignored;
+    }
+
     final handled = widget.terminal.keyInput(
       key,
       ctrl: HardwareKeyboard.instance.isControlPressed,
