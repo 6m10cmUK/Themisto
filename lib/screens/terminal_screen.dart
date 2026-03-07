@@ -500,7 +500,6 @@ class _TerminalScreenState extends State<TerminalScreen> {
       child: TerminalView(
         tab.terminal,
         autofocus: true,
-        hardwareKeyboardOnly: _isDesktop,
         deleteDetection: !_isDesktop,
         textStyle: const TerminalStyle(
           fontFamily: 'TerminalFont',

@@ -420,15 +420,15 @@ class TerminalViewState extends State<TerminalView> {
     final alt = HardwareKeyboard.instance.isAltPressed;
     final shift = HardwareKeyboard.instance.isShiftPressed;
 
-    // In hardwareKeyboardOnly mode, let printable character keys without
-    // Ctrl/Alt pass through to CustomKeyboardListener's character fallback.
-    // This allows IME-composed characters to be inserted correctly.
-    if (widget.hardwareKeyboardOnly &&
-        !ctrl &&
-        !alt &&
-        event.character != null &&
-        event.character!.isNotEmpty) {
-      return KeyEventResult.ignored;
+    // On desktop with TextInput (not hardwareKeyboardOnly), let printable
+    // character keys without Ctrl/Alt pass through to TextInput/IME.
+    // Only printable chars (code >= 0x20) are passed; control chars like
+    // Enter, Tab, Escape are still handled directly.
+    if (!widget.hardwareKeyboardOnly && !ctrl && !alt) {
+      final char = event.character;
+      if (char != null && char.isNotEmpty && char.codeUnitAt(0) >= 0x20) {
+        return KeyEventResult.ignored;
+      }
     }
 
     final handled = widget.terminal.keyInput(
