@@ -70,7 +70,6 @@ class _TerminalScreenState extends State<TerminalScreen>
     super.initState();
     WidgetsBinding.instance.addObserver(this);
     _addTab(widget.sessionName);
-    if (!_isDesktop) _enableBackground();
   }
 
   Future<void> _enableBackground() async {
@@ -229,6 +228,9 @@ class _TerminalScreenState extends State<TerminalScreen>
       });
 
       setState(() => tab.connected = true);
+      if (!_isDesktop && !FlutterBackground.isBackgroundExecutionEnabled) {
+        _enableBackground();
+      }
     } catch (e) {
       setState(() => tab.error = e.toString());
     }
