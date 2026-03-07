@@ -416,26 +416,11 @@ class TerminalViewState extends State<TerminalView> {
       return KeyEventResult.ignored;
     }
 
-    final ctrl = HardwareKeyboard.instance.isControlPressed;
-    final alt = HardwareKeyboard.instance.isAltPressed;
-    final shift = HardwareKeyboard.instance.isShiftPressed;
-
-    // On desktop with TextInput (not hardwareKeyboardOnly), let printable
-    // character keys without Ctrl/Alt pass through to TextInput/IME.
-    // Only printable chars (code >= 0x20) are passed; control chars like
-    // Enter, Tab, Escape are still handled directly.
-    if (!widget.hardwareKeyboardOnly && !ctrl && !alt) {
-      final char = event.character;
-      if (char != null && char.isNotEmpty && char.codeUnitAt(0) >= 0x20) {
-        return KeyEventResult.ignored;
-      }
-    }
-
     final handled = widget.terminal.keyInput(
       key,
-      ctrl: ctrl,
-      alt: alt,
-      shift: shift,
+      ctrl: HardwareKeyboard.instance.isControlPressed,
+      alt: HardwareKeyboard.instance.isAltPressed,
+      shift: HardwareKeyboard.instance.isShiftPressed,
     );
 
     if (handled) {

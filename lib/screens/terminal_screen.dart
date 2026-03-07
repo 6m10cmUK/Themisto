@@ -5,6 +5,7 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:flutter_background/flutter_background.dart';
 import 'package:dartssh2/dartssh2.dart';
 import 'package:xterm/xterm.dart';
 import '../models/host_config.dart';
@@ -54,7 +55,8 @@ class TerminalScreen extends StatefulWidget {
   State<TerminalScreen> createState() => _TerminalScreenState();
 }
 
-class _TerminalScreenState extends State<TerminalScreen> {
+class _TerminalScreenState extends State<TerminalScreen>
+    with WidgetsBindingObserver {
   final List<_TerminalTab> _tabs = [];
   int _currentIndex = 0;
   bool _ctrlHeld = false;
@@ -66,7 +68,34 @@ class _TerminalScreenState extends State<TerminalScreen> {
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     _addTab(widget.sessionName);
+    if (!_isDesktop) _enableBackground();
+  }
+
+  Future<void> _enableBackground() async {
+    const config = FlutterBackgroundAndroidConfig(
+      notificationTitle: 'Themisto',
+      notificationText: 'SSH接続中',
+      notificationImportance: AndroidNotificationImportance.normal,
+    );
+    final initialized = await FlutterBackground.initialize(androidConfig: config);
+    if (initialized) {
+      await FlutterBackground.enableBackgroundExecution();
+    }
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed) {
+      // アプリがフォアグラウンドに戻った時、切断されたタブを再接続
+      for (final tab in _tabs) {
+        if (!tab.connected && !tab._reconnecting) {
+          tab._retryCount = 0;
+          _reconnectTab(tab);
+        }
+      }
+    }
   }
 
   Future<SSHClient> _getClient() async {
@@ -294,6 +323,10 @@ class _TerminalScreenState extends State<TerminalScreen> {
 
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    if (!_isDesktop && FlutterBackground.isBackgroundExecutionEnabled) {
+      FlutterBackground.disableBackgroundExecution();
+    }
     for (final tab in _tabs) {
       for (final sub in tab.subscriptions) {
         sub.cancel();
