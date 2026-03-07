@@ -8,6 +8,7 @@ import 'package:dartssh2/dartssh2.dart';
 import 'package:xterm/xterm.dart';
 import '../models/host_config.dart';
 import '../services/ssh_service.dart';
+import '../widgets/split_view.dart';
 
 final _isDesktop = defaultTargetPlatform == TargetPlatform.windows ||
     defaultTargetPlatform == TargetPlatform.macOS ||
@@ -56,6 +57,7 @@ class _TerminalScreenState extends State<TerminalScreen> {
   bool _ctrlHeld = false;
   SSHClient? _sharedClient;
   Completer<SSHClient>? _connectingClient;
+  SplitViewController? _splitController;
   _TerminalTab get _currentTab => _tabs[_currentIndex];
 
   @override
@@ -135,6 +137,9 @@ class _TerminalScreenState extends State<TerminalScreen> {
     setState(() {
       _tabs.add(tab);
       _currentIndex = _tabs.length - 1;
+      if (_isDesktop) {
+        _splitController ??= SplitViewController(initialTabIndex: 0);
+      }
     });
     _connectTab(tab);
   }
@@ -206,6 +211,7 @@ class _TerminalScreenState extends State<TerminalScreen> {
     tab.subscriptions.clear();
     tab.session?.close();
     setState(() {
+      _splitController?.removeTabFromAll(index);
       _tabs.removeAt(index);
       if (index < _currentIndex) {
         _currentIndex--;
@@ -336,7 +342,7 @@ class _TerminalScreenState extends State<TerminalScreen> {
               itemBuilder: (context, i) {
                 final tab = _tabs[i];
                 final selected = i == _currentIndex;
-                return GestureDetector(
+                final tabWidget = GestureDetector(
                   onTap: () => setState(() => _currentIndex = i),
                   child: Container(
                     padding: const EdgeInsets.symmetric(horizontal: 12),
@@ -378,6 +384,29 @@ class _TerminalScreenState extends State<TerminalScreen> {
                     ),
                   ),
                 );
+                if (!_isDesktop) return tabWidget;
+                return Draggable<int>(
+                  data: i,
+                  feedback: Material(
+                    elevation: 4,
+                    borderRadius: BorderRadius.circular(6),
+                    child: Container(
+                      padding: const EdgeInsets.symmetric(
+                          horizontal: 12, vertical: 8),
+                      decoration: BoxDecoration(
+                        color: Theme.of(context).colorScheme.surface,
+                        borderRadius: BorderRadius.circular(6),
+                      ),
+                      child: Text(tab.sessionName,
+                          style: const TextStyle(fontSize: 13)),
+                    ),
+                  ),
+                  childWhenDragging: Opacity(
+                    opacity: 0.4,
+                    child: tabWidget,
+                  ),
+                  child: tabWidget,
+                );
               },
             ),
           ),
@@ -406,8 +435,11 @@ class _TerminalScreenState extends State<TerminalScreen> {
     setState(() => _ctrlHeld = false);
   }
 
-  Widget _buildBody() {
-    final tab = _currentTab;
+  Widget _buildTerminalPane(int tabIndex) {
+    if (tabIndex < 0 || tabIndex >= _tabs.length) {
+      return Container(color: Colors.black);
+    }
+    final tab = _tabs[tabIndex];
     if (tab.error != null) {
       if (tab._reconnecting) {
         return const Center(
@@ -441,7 +473,7 @@ class _TerminalScreenState extends State<TerminalScreen> {
     if (!tab.connected) {
       return const Center(child: CircularProgressIndicator());
     }
-    final terminalView = Listener(
+    return Listener(
       behavior: HitTestBehavior.translucent,
       onPointerDown: (event) {
         tab._lastPointerPosition = event.position;
@@ -476,10 +508,27 @@ class _TerminalScreenState extends State<TerminalScreen> {
         ),
       ),
     );
+  }
 
-    if (_isDesktop) {
-      return terminalView;
+  Widget _buildBody() {
+    if (_isDesktop && _splitController != null) {
+      return SplitView(
+        controller: _splitController!,
+        tabCount: _tabs.length,
+        paneBuilder: (tabIndex, leafId, focused) {
+          return _buildTerminalPane(tabIndex);
+        },
+        onFocusChanged: (leafId) {
+          final leaf = _splitController!.focusedLeaf();
+          if (leaf != null) {
+            setState(() => _currentIndex = leaf.tabIndex);
+          }
+        },
+        onChanged: () => setState(() {}),
+      );
     }
+
+    final terminalView = _buildTerminalPane(_currentIndex);
 
     final keyboardHeight = MediaQuery.of(context).viewInsets.bottom;
     return Transform.translate(
