@@ -9,8 +9,10 @@ import 'package:flutter_background/flutter_background.dart';
 import 'package:dartssh2/dartssh2.dart';
 import 'package:xterm/xterm.dart';
 import '../models/host_config.dart';
+import '../services/command_history_service.dart';
 import '../services/ssh_service.dart';
 import '../widgets/split_view.dart';
+import 'package:xterm/suggestion.dart';
 
 final _isDesktop = defaultTargetPlatform == TargetPlatform.windows ||
     defaultTargetPlatform == TargetPlatform.macOS ||
@@ -66,6 +68,13 @@ class _TerminalScreenState extends State<TerminalScreen>
   Completer<SSHClient>? _connectingClient;
   SplitViewController? _splitController;
   _TerminalTab get _currentTab => _tabs[_currentIndex];
+
+  // Autocomplete
+  late final _historyService = CommandHistoryService(hostId: widget.host.id);
+  final _suggestionController = SuggestionPortalController();
+  List<String> _suggestions = [];
+  String _lastInput = '';
+  Timer? _debounceTimer;
 
   @override
   void initState() {
@@ -223,6 +232,7 @@ class _TerminalScreenState extends State<TerminalScreen>
 
       tab.terminal.onOutput = (data) {
         tab.session?.write(Uint8List.fromList(utf8.encode(data)));
+        _onTerminalOutput(tab, data);
       };
 
       tab.terminal.onResize = (width, height, pixelWidth, pixelHeight) {
@@ -372,22 +382,27 @@ class _TerminalScreenState extends State<TerminalScreen>
       tab.focusNode.dispose();
     }
     _sharedClient?.close();
+    _debounceTimer?.cancel();
     super.dispose();
   }
 
   @override
   Widget build(BuildContext context) {
     if (_tabs.isEmpty) return const SizedBox.shrink();
-    return Scaffold(
-      resizeToAvoidBottomInset: false,
-      appBar: AppBar(
-        toolbarHeight: 0,
-        bottom: PreferredSize(
-          preferredSize: const Size.fromHeight(40),
-          child: _buildTabBar(),
+    return SuggestionPortal(
+      controller: _suggestionController,
+      overlayBuilder: (_) => _buildSuggestionOverlay(),
+      child: Scaffold(
+        resizeToAvoidBottomInset: false,
+        appBar: AppBar(
+          toolbarHeight: 0,
+          bottom: PreferredSize(
+            preferredSize: const Size.fromHeight(40),
+            child: _buildTabBar(),
+          ),
         ),
+        body: _buildBody(),
       ),
-      body: _buildBody(),
     );
   }
 
@@ -528,6 +543,147 @@ class _TerminalScreenState extends State<TerminalScreen>
         Uint8List.fromList(utf8.encode(data.text!)),
       );
     }
+  }
+
+  // --- Autocomplete ---
+
+  void _onTerminalOutput(_TerminalTab tab, String data) {
+    if (data == '\r' || data == '\n') {
+      // Enter pressed — save current input line as command
+      final input = _getCurrentInput(tab);
+      if (input.isNotEmpty) {
+        _historyService.add(input);
+      }
+      _hideSuggestions();
+      _lastInput = '';
+      return;
+    }
+    // Escape sequences (arrows, ctrl, etc.) — hide suggestions
+    if (data.startsWith('\x1b')) {
+      _hideSuggestions();
+      _lastInput = '';
+      return;
+    }
+    // Ctrl-C
+    if (data.codeUnitAt(0) < 0x20) {
+      _hideSuggestions();
+      _lastInput = '';
+      return;
+    }
+    // Debounce search
+    _debounceTimer?.cancel();
+    _debounceTimer = Timer(const Duration(milliseconds: 200), () {
+      _updateSuggestions(tab);
+    });
+  }
+
+  String _getCurrentInput(_TerminalTab tab) {
+    final buffer = tab.terminal.buffer;
+    final cursorY = buffer.absoluteCursorY;
+    if (cursorY < 0 || cursorY >= buffer.lines.length) return '';
+    final line = buffer.lines[cursorY].toString().trimRight();
+    // Try to strip prompt: find last $ or # or > or %
+    final promptPattern = RegExp(r'[\$#>%]\s');
+    final match = promptPattern.allMatches(line).lastOrNull;
+    if (match != null) {
+      return line.substring(match.end);
+    }
+    return line;
+  }
+
+  Future<void> _updateSuggestions(_TerminalTab tab) async {
+    final input = _getCurrentInput(tab);
+    if (input.isEmpty || input == _lastInput) {
+      if (input.isEmpty) _hideSuggestions();
+      return;
+    }
+    _lastInput = input;
+    final results = await _historyService.search(input);
+    if (!mounted) return;
+    if (results.isEmpty) {
+      _hideSuggestions();
+      return;
+    }
+    setState(() => _suggestions = results);
+    // Get cursor rect from terminal view for positioning
+    final buffer = tab.terminal.buffer;
+    final cursorX = buffer.cursorX;
+    final cursorY = buffer.cursorY;
+    // Approximate cell size (will be close enough for overlay positioning)
+    final renderBox = tab.focusNode.context?.findRenderObject() as RenderBox?;
+    if (renderBox == null) return;
+    final size = renderBox.size;
+    final cellWidth = size.width / tab.terminal.viewWidth;
+    final cellHeight = size.height / tab.terminal.viewHeight;
+    final rect = Rect.fromLTWH(
+      cursorX * cellWidth,
+      (cursorY + 1) * cellHeight,
+      cellWidth,
+      cellHeight,
+    );
+    // Convert to global coordinates
+    final globalOffset = renderBox.localToGlobal(rect.topLeft);
+    final globalRect = Rect.fromLTWH(
+      globalOffset.dx, globalOffset.dy, rect.width, rect.height,
+    );
+    _suggestionController.update(globalRect);
+  }
+
+  void _hideSuggestions() {
+    if (_suggestionController.isShowing) {
+      _suggestionController.hide();
+    }
+    if (_suggestions.isNotEmpty) {
+      setState(() => _suggestions = []);
+    }
+  }
+
+  Widget _buildSuggestionOverlay() {
+    if (_suggestions.isEmpty) return const SizedBox.shrink();
+    return Material(
+      elevation: 4,
+      borderRadius: BorderRadius.circular(8),
+      color: Theme.of(context).colorScheme.surfaceContainerHighest,
+      child: ConstrainedBox(
+        constraints: const BoxConstraints(maxWidth: 300, maxHeight: 200),
+        child: ListView.builder(
+          shrinkWrap: true,
+          padding: const EdgeInsets.symmetric(vertical: 4),
+          itemCount: _suggestions.length,
+          itemBuilder: (context, index) {
+            final suggestion = _suggestions[index];
+            return InkWell(
+              onTap: () => _acceptSuggestion(suggestion),
+              child: Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                child: Text(
+                  suggestion,
+                  style: TextStyle(
+                    fontSize: 13,
+                    fontFamily: 'TerminalFont',
+                    color: Theme.of(context).colorScheme.onSurface,
+                  ),
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                ),
+              ),
+            );
+          },
+        ),
+      ),
+    );
+  }
+
+  void _acceptSuggestion(String suggestion) {
+    if (_tabs.isEmpty) return;
+    final tab = _currentTab;
+    final input = _getCurrentInput(tab);
+    if (suggestion.length > input.length) {
+      final remaining = suggestion.substring(input.length);
+      tab.session?.write(Uint8List.fromList(utf8.encode(remaining)));
+    }
+    _hideSuggestions();
+    _lastInput = '';
   }
 
   void _sendKey(String seq) {
