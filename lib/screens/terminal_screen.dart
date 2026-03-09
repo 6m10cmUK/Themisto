@@ -811,22 +811,33 @@ class _TerminalScreenState extends State<TerminalScreen>
     final extentPixel = render.getOffset(extentOffset);
     final cellHeight = render.lineHeight;
 
-    return Stack(
-      children: [
-        _buildHandle(tab, basePixel, cellHeight, true),
-        _buildHandle(tab, extentPixel, cellHeight, false),
-      ],
-    );
+    return LayoutBuilder(builder: (context, constraints) {
+      final parentSize = Size(constraints.maxWidth, constraints.maxHeight);
+      return Stack(
+        children: [
+          _buildHandle(tab, basePixel, cellHeight, true, parentSize),
+          _buildHandle(tab, extentPixel, cellHeight, false, parentSize),
+        ],
+      );
+    });
   }
 
   Widget _buildHandle(
     _TerminalTab tab, Offset position, double cellHeight, bool isBase,
+    Size parentSize,
   ) {
     const handleSize = 20.0;
     const hitSize = 44.0;
+    const hitPad = (hitSize - handleSize) / 2;
+
+    final left = (position.dx - hitSize / 2).clamp(0.0, parentSize.width - hitSize);
+    final top = isBase
+        ? (position.dy - handleSize - hitPad).clamp(0.0, parentSize.height - hitSize)
+        : (position.dy + cellHeight - hitPad).clamp(0.0, parentSize.height - hitSize);
+
     return Positioned(
-      left: position.dx - hitSize / 2,
-      top: isBase ? position.dy - handleSize - (hitSize - handleSize) / 2 : position.dy + cellHeight - (hitSize - handleSize) / 2,
+      left: left,
+      top: top,
       child: GestureDetector(
         behavior: HitTestBehavior.opaque,
         onPanUpdate: (details) {
@@ -836,6 +847,9 @@ class _TerminalScreenState extends State<TerminalScreen>
           final box = render as RenderBox;
           final local = box.globalToLocal(details.globalPosition);
           final cellOffset = render.getCellOffset(local);
+          // Guard against out-of-range y
+          final lines = tab.terminal.buffer.lines;
+          if (cellOffset.y < 0 || cellOffset.y >= lines.length) return;
           final baseOffset = tab.controller.selectionBaseOffset;
           final extentOffset = tab.controller.selectionExtentOffset;
           if (baseOffset == null || extentOffset == null) return;

@@ -1,11 +1,7 @@
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
-
-final _isDesktopPlatform = !kIsWeb &&
-    (defaultTargetPlatform == TargetPlatform.windows ||
-        defaultTargetPlatform == TargetPlatform.macOS ||
-        defaultTargetPlatform == TargetPlatform.linux);
+import 'package:xterm/src/utils/platform.dart';
 
 class CustomTextEdit extends StatefulWidget {
   CustomTextEdit({
@@ -145,7 +141,7 @@ class CustomTextEditState extends State<CustomTextEdit> with TextInputClient {
 
     // On desktop, let printable character keys (without Ctrl/Alt) pass
     // through to the TextInput channel so IME can process them.
-    if (_isDesktopPlatform &&
+    if (isDesktopPlatform &&
         hasInputConnection &&
         event is KeyDownEvent &&
         !HardwareKeyboard.instance.isControlPressed &&
