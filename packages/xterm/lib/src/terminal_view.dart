@@ -1,4 +1,5 @@
 import 'package:flutter/cupertino.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart';
 import 'package:flutter/services.dart';
@@ -20,6 +21,11 @@ import 'package:xterm/src/ui/shortcut/shortcuts.dart';
 import 'package:xterm/src/ui/terminal_text_style.dart';
 import 'package:xterm/src/ui/terminal_theme.dart';
 import 'package:xterm/src/ui/themes.dart';
+
+final bool _isDesktopPlatform = !kIsWeb &&
+    (defaultTargetPlatform == TargetPlatform.windows ||
+        defaultTargetPlatform == TargetPlatform.macOS ||
+        defaultTargetPlatform == TargetPlatform.linux);
 
 class TerminalView extends StatefulWidget {
   const TerminalView(
@@ -349,7 +355,9 @@ class TerminalViewState extends State<TerminalView> {
     if (_controller.selection != null) {
       _controller.clearSelection();
     } else {
-      if (!widget.hardwareKeyboardOnly) {
+      // Always request focus, but only show keyboard on desktop.
+      // On mobile, the keyboard is toggled via the accessory bar button.
+      if (!widget.hardwareKeyboardOnly && _isDesktopPlatform) {
         _customTextEditKey.currentState?.requestKeyboard();
       } else {
         _focusNode.requestFocus();

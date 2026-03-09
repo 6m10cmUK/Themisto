@@ -37,6 +37,7 @@ class _TerminalTab {
   int _retryCount = 0;
   List<StreamSubscription> subscriptions = [];
   Offset? _lastPointerPosition;
+  final GlobalKey<TerminalViewState> terminalKey = GlobalKey<TerminalViewState>();
 
   final FocusNode focusNode = FocusNode();
 
@@ -526,6 +527,7 @@ class _TerminalScreenState extends State<TerminalScreen>
     final text = _currentTab.terminal.buffer.getText(range);
     if (text.isNotEmpty) {
       Clipboard.setData(ClipboardData(text: text));
+      _currentTab.controller.clearSelection();
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(
           content: Text('コピーしました'),
@@ -744,6 +746,7 @@ class _TerminalScreenState extends State<TerminalScreen>
         tab._lastPointerPosition = event.position;
       },
       onPointerMove: (event) {
+        if (tab.controller.selection != null) return;
         if (tab._lastPointerPosition == null) return;
         final diff = event.position - tab._lastPointerPosition!;
         if (diff.dy.abs() < _kPointerMoveMinDistance) return;
@@ -762,17 +765,106 @@ class _TerminalScreenState extends State<TerminalScreen>
           _handleScroll(tab, event.scrollDelta.dy);
         }
       },
-      child: TerminalView(
-        tab.terminal,
-        controller: tab.controller,
-        focusNode: tab.focusNode,
-        autofocus: true,
-        deleteDetection: !_isDesktop,
-        keyboardType: _isDesktop ? TextInputType.text : TextInputType.emailAddress,
-        textStyle: const TerminalStyle(
-          fontFamily: 'TerminalFont',
-          fontFamilyFallback: ['TerminalFontJP'],
-          locale: Locale('ja', 'JP'),
+      child: Stack(
+        children: [
+          TerminalView(
+            tab.terminal,
+            key: tab.terminalKey,
+            controller: tab.controller,
+            focusNode: tab.focusNode,
+            autofocus: true,
+            deleteDetection: !_isDesktop,
+            keyboardType: _isDesktop ? TextInputType.text : TextInputType.emailAddress,
+            textStyle: const TerminalStyle(
+              fontFamily: 'TerminalFont',
+              fontFamilyFallback: ['TerminalFontJP'],
+              locale: Locale('ja', 'JP'),
+            ),
+          ),
+          if (!_isDesktop)
+            ListenableBuilder(
+              listenable: tab.controller,
+              builder: (context, _) {
+                if (tab.controller.selection == null) {
+                  return const SizedBox.shrink();
+                }
+                return _buildSelectionHandles(tab);
+              },
+            ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildSelectionHandles(_TerminalTab tab) {
+    final state = tab.terminalKey.currentState;
+    if (state == null) return const SizedBox.shrink();
+    final render = state.renderTerminal;
+
+    final baseOffset = tab.controller.selectionBaseOffset;
+    final extentOffset = tab.controller.selectionExtentOffset;
+    if (baseOffset == null || extentOffset == null) {
+      return const SizedBox.shrink();
+    }
+
+    final basePixel = render.getOffset(baseOffset);
+    final extentPixel = render.getOffset(extentOffset);
+    final cellHeight = render.lineHeight;
+
+    return Stack(
+      children: [
+        _buildHandle(tab, basePixel, cellHeight, true),
+        _buildHandle(tab, extentPixel, cellHeight, false),
+      ],
+    );
+  }
+
+  Widget _buildHandle(
+    _TerminalTab tab, Offset position, double cellHeight, bool isBase,
+  ) {
+    const handleSize = 20.0;
+    const hitSize = 44.0;
+    return Positioned(
+      left: position.dx - hitSize / 2,
+      top: isBase ? position.dy - handleSize - (hitSize - handleSize) / 2 : position.dy + cellHeight - (hitSize - handleSize) / 2,
+      child: GestureDetector(
+        behavior: HitTestBehavior.opaque,
+        onPanUpdate: (details) {
+          final state = tab.terminalKey.currentState;
+          if (state == null) return;
+          final render = state.renderTerminal;
+          final box = render as RenderBox;
+          final local = box.globalToLocal(details.globalPosition);
+          final cellOffset = render.getCellOffset(local);
+          final baseOffset = tab.controller.selectionBaseOffset;
+          final extentOffset = tab.controller.selectionExtentOffset;
+          if (baseOffset == null || extentOffset == null) return;
+          final buffer = tab.terminal.buffer;
+          if (isBase) {
+            tab.controller.setSelection(
+              buffer.createAnchorFromOffset(cellOffset),
+              buffer.createAnchorFromOffset(extentOffset),
+            );
+          } else {
+            tab.controller.setSelection(
+              buffer.createAnchorFromOffset(baseOffset),
+              buffer.createAnchorFromOffset(cellOffset),
+            );
+          }
+        },
+        child: SizedBox(
+          width: hitSize,
+          height: hitSize,
+          child: Center(
+            child: Container(
+              width: handleSize,
+              height: handleSize,
+              decoration: BoxDecoration(
+                color: Theme.of(context).colorScheme.primary,
+                shape: BoxShape.circle,
+              ),
+            ),
+          ),
         ),
       ),
     );
@@ -851,9 +943,8 @@ class _TerminalScreenState extends State<TerminalScreen>
                       if (keyboardVisible) {
                         FocusScope.of(context).unfocus();
                       } else {
-                        // Re-focus the terminal to open the keyboard
                         final tab = _tabs[_currentIndex];
-                        tab.focusNode.requestFocus();
+                        tab.terminalKey.currentState?.requestKeyboard();
                       }
                     },
                     child: Container(

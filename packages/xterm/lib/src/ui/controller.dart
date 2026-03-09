@@ -35,6 +35,9 @@ class TerminalController with ChangeNotifier {
   List<TerminalHighlight> get highlights => _highlights;
   final _highlights = <TerminalHighlight>[];
 
+  CellOffset? get selectionBaseOffset => _selectionBase?.offset;
+  CellOffset? get selectionExtentOffset => _selectionExtent?.offset;
+
   BufferRange? get selection {
     final base = _selectionBase;
     final extent = _selectionExtent;
