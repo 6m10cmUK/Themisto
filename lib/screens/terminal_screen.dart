@@ -936,6 +936,7 @@ class _TerminalScreenState extends State<TerminalScreen>
                     _keyButton('→', () => _sendKey('\x1b[C')),
                     _divider(),
                     _keyButton('Enter', () => _sendKey('\r')),
+                    _keyButton('\\\u23CE', () => _sendKey('\\\r')),
                     _divider(),
                     _keyButton('Copy', _copySelection),
                     _keyButton('Paste', _pasteClipboard),
