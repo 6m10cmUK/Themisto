@@ -17,6 +17,7 @@ class HostStorageService {
         list.map((e) => HostConfig.fromJson(e as Map<String, dynamic>)).toList();
     for (final h in hosts) {
       h.password = await _storage.read(key: 'password_${h.id}');
+      h.privateKey = await _storage.read(key: 'privateKey_${h.id}');
     }
     return hosts;
   }
@@ -36,6 +37,9 @@ class HostStorageService {
     if (host.password != null) {
       await _storage.write(key: 'password_${host.id}', value: host.password!);
     }
+    if (host.privateKey != null) {
+      await _storage.write(key: 'privateKey_${host.id}', value: host.privateKey!);
+    }
   }
 
   Future<void> delete(String id) async {
@@ -46,5 +50,6 @@ class HostStorageService {
       value: jsonEncode(hosts.map((h) => h.toJson()).toList()),
     );
     await _storage.delete(key: 'password_$id');
+    await _storage.delete(key: 'privateKey_$id');
   }
 }

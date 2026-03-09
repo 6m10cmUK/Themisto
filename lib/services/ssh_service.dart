@@ -5,13 +5,33 @@ class SshService {
   static const pathPrefix =
       'export PATH="/opt/homebrew/bin:/usr/local/bin:\$PATH"';
 
+  static final _validSessionName = RegExp(r'^[a-zA-Z0-9_-]+$');
+
+  /// セッション名がシェルインジェクションに安全かを検証し、
+  /// シングルクォートで囲んだ文字列を返す。
+  static String sanitizeSessionName(String name) {
+    if (!_validSessionName.hasMatch(name)) {
+      throw ArgumentError('不正なセッション名: $name');
+    }
+    return "'$name'";
+  }
+
   Future<SSHClient> connect(HostConfig config) async {
-    final client = SSHClient(
-      await SSHSocket.connect(config.host, config.port),
+    final socket = await SSHSocket.connect(config.host, config.port);
+
+    if (config.authType == AuthType.key && config.privateKey != null) {
+      return SSHClient(
+        socket,
+        username: config.username,
+        identities: SSHKeyPair.fromPem(config.privateKey!),
+      );
+    }
+
+    return SSHClient(
+      socket,
       username: config.username,
       onPasswordRequest: () => config.password ?? '',
     );
-    return client;
   }
 
   Future<(List<String>, String)> listTmuxSessions(SSHClient client) async {
@@ -29,10 +49,12 @@ class SshService {
   }
 
   Future<void> createSession(SSHClient client, String name) async {
-    await client.run('$pathPrefix && tmux new-session -d -s $name');
+    final safeName = sanitizeSessionName(name);
+    await client.run('$pathPrefix && tmux new-session -d -s $safeName');
   }
 
   Future<void> killSession(SSHClient client, String name) async {
-    await client.run('$pathPrefix && tmux kill-session -t $name');
+    final safeName = sanitizeSessionName(name);
+    await client.run('$pathPrefix && tmux kill-session -t $safeName');
   }
 }

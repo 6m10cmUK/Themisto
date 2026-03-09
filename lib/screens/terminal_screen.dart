@@ -34,6 +34,7 @@ class _TerminalTab {
   String? error;
   double scrollAccumulator = 0;
   bool _reconnecting = false;
+  bool _intentionallyClosed = false;
   int _retryCount = 0;
   List<StreamSubscription> subscriptions = [];
   Offset? _lastPointerPosition;
@@ -76,12 +77,57 @@ class _TerminalScreenState extends State<TerminalScreen>
   List<String> _suggestions = [];
   String _lastInput = '';
   Timer? _debounceTimer;
+  Timer? _watchdogTimer;
 
   @override
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
     _addTab(widget.sessionName);
+    _startWatchdog();
+  }
+
+  void _startWatchdog() {
+    _watchdogTimer = Timer.periodic(const Duration(seconds: 15), (_) {
+      _checkConnection();
+    });
+  }
+
+  Future<void> _checkConnection() async {
+    if (_sharedClient == null || _sharedClient!.isClosed) {
+      _sharedClient = null;
+      for (final tab in _tabs) {
+        if (tab.connected && !tab._intentionallyClosed && !tab._reconnecting) {
+          if (mounted) {
+            setState(() {
+              tab.connected = false;
+              tab.error = 'Connection lost';
+            });
+          }
+          _reconnectTab(tab);
+        }
+      }
+      return;
+    }
+    // ping で生存確認
+    try {
+      await _sharedClient!.ping().timeout(const Duration(seconds: 5));
+    } catch (_) {
+      // ping失敗 = 接続死んでる
+      _sharedClient?.close();
+      _sharedClient = null;
+      for (final tab in _tabs) {
+        if (tab.connected && !tab._intentionallyClosed && !tab._reconnecting) {
+          if (mounted) {
+            setState(() {
+              tab.connected = false;
+              tab.error = 'Connection lost';
+            });
+          }
+          _reconnectTab(tab);
+        }
+      }
+    }
   }
 
   Future<void> _enableBackground() async {
@@ -105,7 +151,7 @@ class _TerminalScreenState extends State<TerminalScreen>
       }
       // 切断されたタブを再接続（エラー状態含む）
       for (final tab in _tabs) {
-        if ((!tab.connected || tab.error != null) && !tab._reconnecting) {
+        if ((!tab.connected || tab.error != null) && !tab._reconnecting && !tab._intentionallyClosed) {
           tab._retryCount = 0;
           tab.error = null;
           _reconnectTab(tab);
@@ -209,7 +255,7 @@ class _TerminalScreenState extends State<TerminalScreen>
       );
 
       tab.session!.write(Uint8List.fromList(
-        '${SshService.pathPrefix} && tmux set -g mouse on 2>/dev/null; tmux -u attach-session -t ${tab.sessionName}\n'
+        "${SshService.pathPrefix} && tmux set -g mouse on 2>/dev/null; tmux -u attach-session -t ${SshService.sanitizeSessionName(tab.sessionName)}\n"
             .codeUnits,
       ));
 
@@ -232,6 +278,20 @@ class _TerminalScreenState extends State<TerminalScreen>
       );
 
       tab.terminal.onOutput = (data) {
+        if (_sharedClient != null && _sharedClient!.isClosed) {
+          // 接続が死んでる — 再接続トリガー
+          _sharedClient = null;
+          if (tab.connected && !tab._intentionallyClosed && !tab._reconnecting) {
+            if (mounted) {
+              setState(() {
+                tab.connected = false;
+                tab.error = 'Connection lost';
+              });
+            }
+            _reconnectTab(tab);
+          }
+          return;
+        }
         tab.session?.write(Uint8List.fromList(utf8.encode(data)));
         _onTerminalOutput(tab, data);
       };
@@ -241,7 +301,7 @@ class _TerminalScreenState extends State<TerminalScreen>
       };
 
       tab.session!.done.then((_) {
-        if (mounted) {
+        if (mounted && !tab._intentionallyClosed) {
           setState(() {
             tab.connected = false;
             tab.error = 'Connection lost';
@@ -250,11 +310,13 @@ class _TerminalScreenState extends State<TerminalScreen>
         }
       });
 
+      if (!mounted) return;
       setState(() => tab.connected = true);
       if (!_isDesktop && !FlutterBackground.isBackgroundExecutionEnabled) {
         _enableBackground();
       }
     } catch (e) {
+      if (!mounted) return;
       setState(() => tab.error = e.toString());
     }
   }
@@ -283,11 +345,13 @@ class _TerminalScreenState extends State<TerminalScreen>
   void _closeTab(int index) {
     if (index < 0 || index >= _tabs.length) return;
     final tab = _tabs[index];
+    tab._intentionallyClosed = true;
     for (final sub in tab.subscriptions) {
       sub.cancel();
     }
     tab.subscriptions.clear();
     tab.session?.close();
+    tab.controller.dispose();
     tab.focusNode.dispose();
     setState(() {
       _splitController?.removeTabFromAll(index);
@@ -380,10 +444,12 @@ class _TerminalScreenState extends State<TerminalScreen>
       }
       tab.subscriptions.clear();
       tab.session?.close();
+      tab.controller.dispose();
       tab.focusNode.dispose();
     }
     _sharedClient?.close();
     _debounceTimer?.cancel();
+    _watchdogTimer?.cancel();
     super.dispose();
   }
 
@@ -416,6 +482,11 @@ class _TerminalScreenState extends State<TerminalScreen>
             icon: const Icon(Icons.arrow_back, size: 20),
             onPressed: () {
               for (final tab in _tabs) {
+                tab._intentionallyClosed = true;
+                for (final sub in tab.subscriptions) {
+                  sub.cancel();
+                }
+                tab.subscriptions.clear();
                 tab.session?.close();
               }
               _sharedClient?.close();
@@ -890,6 +961,21 @@ class _TerminalScreenState extends State<TerminalScreen>
         controller: _splitController!,
         tabCount: _tabs.length,
         paneBuilder: (tabIndex, leafId, focused) {
+          // 同じタブが複数ペインに割り当てられている場合、
+          // GlobalKeyの重複を避けるため最初のリーフのみ描画する
+          final leaves = _splitController!.allLeaves();
+          final firstLeaf = leaves.firstWhere((l) => l.tabIndex == tabIndex);
+          if (firstLeaf.id != leafId) {
+            return Container(
+              color: Colors.black,
+              child: const Center(
+                child: Text(
+                  'このタブは別のペインで表示中',
+                  style: TextStyle(color: Colors.white70),
+                ),
+              ),
+            );
+          }
           return _buildTerminalPane(tabIndex);
         },
         onFocusChanged: (leafId) {

@@ -18,6 +18,8 @@ class _HostEditScreenState extends ConsumerState<HostEditScreen> {
   late final TextEditingController _portCtrl;
   late final TextEditingController _userCtrl;
   late final TextEditingController _passCtrl;
+  late final TextEditingController _keyCtrl;
+  late AuthType _authType;
 
   @override
   void initState() {
@@ -28,6 +30,8 @@ class _HostEditScreenState extends ConsumerState<HostEditScreen> {
     _portCtrl = TextEditingController(text: (h?.port ?? 22).toString());
     _userCtrl = TextEditingController(text: h?.username ?? '');
     _passCtrl = TextEditingController(text: h?.password ?? '');
+    _keyCtrl = TextEditingController(text: h?.privateKey ?? '');
+    _authType = h?.authType ?? AuthType.password;
   }
 
   @override
@@ -37,6 +41,7 @@ class _HostEditScreenState extends ConsumerState<HostEditScreen> {
     _portCtrl.dispose();
     _userCtrl.dispose();
     _passCtrl.dispose();
+    _keyCtrl.dispose();
     super.dispose();
   }
 
@@ -76,11 +81,28 @@ class _HostEditScreenState extends ConsumerState<HostEditScreen> {
                 decoration: const InputDecoration(labelText: 'Username'),
                 validator: (v) => (v == null || v.isEmpty) ? 'Required' : null,
               ),
-              TextFormField(
-                controller: _passCtrl,
-                decoration: const InputDecoration(labelText: 'Password'),
-                obscureText: true,
+              DropdownButtonFormField<AuthType>(
+                initialValue: _authType,
+                decoration: const InputDecoration(labelText: '認証方式'),
+                items: const [
+                  DropdownMenuItem(value: AuthType.password, child: Text('パスワード')),
+                  DropdownMenuItem(value: AuthType.key, child: Text('SSH鍵')),
+                ],
+                onChanged: (v) => setState(() => _authType = v!),
               ),
+              if (_authType == AuthType.password)
+                TextFormField(
+                  controller: _passCtrl,
+                  decoration: const InputDecoration(labelText: 'Password'),
+                  obscureText: true,
+                ),
+              if (_authType == AuthType.key)
+                TextFormField(
+                  controller: _keyCtrl,
+                  decoration: const InputDecoration(labelText: '秘密鍵 (PEM形式)'),
+                  maxLines: 5,
+                  style: const TextStyle(fontFamily: 'monospace'),
+                ),
               const SizedBox(height: 24),
               ElevatedButton(
                 onPressed: _save,
@@ -101,7 +123,9 @@ class _HostEditScreenState extends ConsumerState<HostEditScreen> {
       host: _hostCtrl.text,
       port: int.parse(_portCtrl.text),
       username: _userCtrl.text,
-      password: _passCtrl.text.isEmpty ? null : _passCtrl.text,
+      authType: _authType,
+      password: _authType == AuthType.password && _passCtrl.text.isNotEmpty ? _passCtrl.text : null,
+      privateKey: _authType == AuthType.key && _keyCtrl.text.isNotEmpty ? _keyCtrl.text : null,
     );
     await ref.read(hostListProvider.notifier).addOrUpdate(config);
     if (mounted) Navigator.pop(context);
