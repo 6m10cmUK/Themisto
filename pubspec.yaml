@@ -42,6 +42,7 @@ dependencies:
   xterm:
     path: packages/xterm
   flutter_background: ^1.3.0+1
+  flutter_local_notifications: ^21.0.0
 
 dev_dependencies:
   flutter_test:

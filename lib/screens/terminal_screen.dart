@@ -10,6 +10,7 @@ import 'package:dartssh2/dartssh2.dart';
 import 'package:xterm/xterm.dart';
 import '../models/host_config.dart';
 import '../services/command_history_service.dart';
+import '../services/notification_service.dart';
 import '../services/ssh_service.dart';
 import '../widgets/split_view.dart';
 import 'package:xterm/suggestion.dart';
@@ -24,6 +25,9 @@ const _kSgrMouseDown = '\x1b[<64;1;1M';
 const _kMaxLines = 10000;
 final _kSessionNamePattern = RegExp(r'^[a-zA-Z0-9_-]+$');
 const _kPointerMoveMinDistance = 5.0;
+const _kIdleSeconds = 5;
+
+int _nextNotificationId = 0;
 
 class _TerminalTab {
   final String sessionName;
@@ -41,6 +45,12 @@ class _TerminalTab {
   final GlobalKey<TerminalViewState> terminalKey = GlobalKey<TerminalViewState>();
 
   final FocusNode focusNode = FocusNode();
+
+  // Idle通知用
+  final int notificationId = _nextNotificationId++;
+  Timer? _idleTimer;
+  bool _idleNotified = false;
+  DateTime? _connectedAt;
 
   _TerminalTab({required this.sessionName})
       : terminal = Terminal(maxLines: _kMaxLines),
@@ -78,13 +88,29 @@ class _TerminalScreenState extends State<TerminalScreen>
   String _lastInput = '';
   Timer? _debounceTimer;
   Timer? _watchdogTimer;
+  bool _isInBackground = false;
+  StreamSubscription<String>? _notificationTapSub;
 
   @override
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
+    NotificationService.init();
+    _notificationTapSub = NotificationService.onTap.listen(_onNotificationTap);
     _addTab(widget.sessionName);
     _startWatchdog();
+  }
+
+  void _onNotificationTap(String sessionName) {
+    final index = _tabs.indexWhere((t) => t.sessionName == sessionName);
+    if (index >= 0 && index < _tabs.length) {
+      setState(() => _currentIndex = index);
+      final tab = _tabs[index];
+      if (tab._idleNotified) {
+        tab._idleNotified = false;
+        NotificationService.cancel(tab.notificationId);
+      }
+    }
   }
 
   void _startWatchdog() {
@@ -145,6 +171,12 @@ class _TerminalScreenState extends State<TerminalScreen>
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
     if (state == AppLifecycleState.resumed) {
+      _isInBackground = false;
+      // フォアグラウンド復帰時に通知を全部消す
+      NotificationService.cancelAll();
+      for (final tab in _tabs) {
+        tab._idleNotified = false;
+      }
       // 共有クライアントが死んでたらリセット
       if (_sharedClient != null && _sharedClient!.isClosed) {
         _sharedClient = null;
@@ -158,6 +190,8 @@ class _TerminalScreenState extends State<TerminalScreen>
         }
       }
       if (mounted) setState(() {});
+    } else if (state == AppLifecycleState.paused) {
+      _isInBackground = true;
     }
   }
 
@@ -265,6 +299,7 @@ class _TerminalScreenState extends State<TerminalScreen>
             .transform(utf8.decoder)
             .listen((data) {
           tab.terminal.write(data);
+          _resetIdleTimer(tab);
         }),
       );
 
@@ -274,6 +309,7 @@ class _TerminalScreenState extends State<TerminalScreen>
             .transform(utf8.decoder)
             .listen((data) {
           tab.terminal.write(data);
+          _resetIdleTimer(tab);
         }),
       );
 
@@ -311,6 +347,7 @@ class _TerminalScreenState extends State<TerminalScreen>
       });
 
       if (!mounted) return;
+      tab._connectedAt = DateTime.now();
       setState(() => tab.connected = true);
       if (!_isDesktop && !FlutterBackground.isBackgroundExecutionEnabled) {
         _enableBackground();
@@ -346,6 +383,8 @@ class _TerminalScreenState extends State<TerminalScreen>
     if (index < 0 || index >= _tabs.length) return;
     final tab = _tabs[index];
     tab._intentionallyClosed = true;
+    tab._idleTimer?.cancel();
+    NotificationService.cancel(tab.notificationId);
     for (final sub in tab.subscriptions) {
       sub.cancel();
     }
@@ -420,6 +459,48 @@ class _TerminalScreenState extends State<TerminalScreen>
     }
   }
 
+  String _getLastVisibleLine(_TerminalTab tab) {
+    final buffer = tab.terminal.buffer;
+    final cursorY = buffer.absoluteCursorY;
+    // カーソル行から上に探して、空でない行を返す
+    for (var y = cursorY; y >= 0 && y > cursorY - 5; y--) {
+      if (y >= buffer.lines.length) continue;
+      final text = buffer.lines[y].toString().trimRight();
+      if (text.isNotEmpty) return text;
+    }
+    return '';
+  }
+
+  void _resetIdleTimer(_TerminalTab tab) {
+    tab._idleTimer?.cancel();
+    // 出力が来た → まだ動いてるのでidle通知をリセット
+    if (tab._idleNotified) {
+      tab._idleNotified = false;
+      NotificationService.cancel(tab.notificationId);
+    }
+    tab._idleTimer = Timer(const Duration(seconds: _kIdleSeconds), () {
+      // 再接続直後10秒はスキップ（tmux再描画後の誤通知防止）
+      if (tab._connectedAt == null ||
+          DateTime.now().difference(tab._connectedAt!).inSeconds < 10) {
+        return;
+      }
+      final isCurrentTab = _tabs.indexOf(tab) == _currentIndex;
+      final shouldNotify = tab.connected &&
+          !tab._intentionallyClosed &&
+          (_isInBackground || !isCurrentTab);
+      if (shouldNotify) {
+        tab._idleNotified = true;
+        final lastLine = _getLastVisibleLine(tab);
+        NotificationService.showIdle(
+          tabId: tab.notificationId,
+          sessionName: tab.sessionName,
+          hostLabel: widget.host.label,
+          lastLine: lastLine,
+        );
+      }
+    });
+  }
+
   void _handleScroll(_TerminalTab tab, double delta) {
     tab.scrollAccumulator += delta;
     while (tab.scrollAccumulator >= _kScrollThreshold) {
@@ -439,6 +520,7 @@ class _TerminalScreenState extends State<TerminalScreen>
       FlutterBackground.disableBackgroundExecution();
     }
     for (final tab in _tabs) {
+      tab._idleTimer?.cancel();
       for (final sub in tab.subscriptions) {
         sub.cancel();
       }
@@ -447,9 +529,11 @@ class _TerminalScreenState extends State<TerminalScreen>
       tab.controller.dispose();
       tab.focusNode.dispose();
     }
+    NotificationService.cancelAll();
     _sharedClient?.close();
     _debounceTimer?.cancel();
     _watchdogTimer?.cancel();
+    _notificationTapSub?.cancel();
     super.dispose();
   }
 
@@ -503,7 +587,13 @@ class _TerminalScreenState extends State<TerminalScreen>
                 final tab = _tabs[i];
                 final selected = i == _currentIndex;
                 final tabWidget = GestureDetector(
-                  onTap: () => setState(() => _currentIndex = i),
+                  onTap: () {
+                    setState(() => _currentIndex = i);
+                    if (tab._idleNotified) {
+                      tab._idleNotified = false;
+                      NotificationService.cancel(tab.notificationId);
+                    }
+                  },
                   child: Container(
                     padding: const EdgeInsets.symmetric(horizontal: 12),
                     alignment: Alignment.center,
@@ -982,6 +1072,11 @@ class _TerminalScreenState extends State<TerminalScreen>
           final leaf = _splitController!.focusedLeaf();
           if (leaf != null) {
             setState(() => _currentIndex = leaf.tabIndex);
+            final tab = _tabs[leaf.tabIndex];
+            if (tab._idleNotified) {
+              tab._idleNotified = false;
+              NotificationService.cancel(tab.notificationId);
+            }
           }
         },
         onChanged: () => setState(() {}),
