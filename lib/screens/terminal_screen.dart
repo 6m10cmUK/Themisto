@@ -51,6 +51,7 @@ class _TerminalTab {
   Timer? _idleTimer;
   bool _idleNotified = false;
   DateTime? _connectedAt;
+  String _lastContentSnapshot = '';
 
   _TerminalTab({required this.sessionName})
       : terminal = Terminal(maxLines: _kMaxLines),
@@ -170,29 +171,42 @@ class _TerminalScreenState extends State<TerminalScreen>
 
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
-    if (state == AppLifecycleState.resumed) {
-      _isInBackground = false;
-      // フォアグラウンド復帰時に通知を全部消す
-      NotificationService.cancelAll();
-      for (final tab in _tabs) {
-        tab._idleNotified = false;
-      }
-      // 共有クライアントが死んでたらリセット
-      if (_sharedClient != null && _sharedClient!.isClosed) {
-        _sharedClient = null;
-      }
-      // 切断されたタブを再接続（エラー状態含む）
-      for (final tab in _tabs) {
-        if ((!tab.connected || tab.error != null) && !tab._reconnecting && !tab._intentionallyClosed) {
-          tab._retryCount = 0;
-          tab.error = null;
-          _reconnectTab(tab);
+    debugPrint('[lifecycle] state=$state');
+    if (state != AppLifecycleState.resumed) {
+      if (!_isInBackground) {
+        _isInBackground = true;
+        // バックグラウンドに入った時、接続中タブのidleタイマーをセット
+        for (final tab in _tabs) {
+          if (tab.connected && !tab._intentionallyClosed) {
+            _resetIdleTimer(tab);
+          }
         }
       }
-      if (mounted) setState(() {});
-    } else if (state == AppLifecycleState.paused) {
-      _isInBackground = true;
+      return;
     }
+    // resumed
+    _isInBackground = false;
+    // 現在表示中のタブの通知だけ消す
+    if (_tabs.isNotEmpty) {
+      final tab = _currentTab;
+      if (tab._idleNotified) {
+        tab._idleNotified = false;
+        NotificationService.cancel(tab.notificationId);
+      }
+    }
+    // 共有クライアントが死んでたらリセット
+    if (_sharedClient != null && _sharedClient!.isClosed) {
+      _sharedClient = null;
+    }
+    // 切断されたタブを再接続（エラー状態含む）
+    for (final tab in _tabs) {
+      if ((!tab.connected || tab.error != null) && !tab._reconnecting && !tab._intentionallyClosed) {
+        tab._retryCount = 0;
+        tab.error = null;
+        _reconnectTab(tab);
+      }
+    }
+    if (mounted) setState(() {});
   }
 
   Future<SSHClient> _getClient() async {
@@ -299,7 +313,7 @@ class _TerminalScreenState extends State<TerminalScreen>
             .transform(utf8.decoder)
             .listen((data) {
           tab.terminal.write(data);
-          _resetIdleTimer(tab);
+          _checkContentAndResetIdle(tab);
         }),
       );
 
@@ -309,7 +323,7 @@ class _TerminalScreenState extends State<TerminalScreen>
             .transform(utf8.decoder)
             .listen((data) {
           tab.terminal.write(data);
-          _resetIdleTimer(tab);
+          _checkContentAndResetIdle(tab);
         }),
       );
 
@@ -471,6 +485,14 @@ class _TerminalScreenState extends State<TerminalScreen>
     return '';
   }
 
+  /// stdoutから呼ばれる: 表示内容が変わった時だけidleタイマーをリセット
+  void _checkContentAndResetIdle(_TerminalTab tab) {
+    final content = _getLastVisibleLine(tab);
+    if (content == tab._lastContentSnapshot) return;
+    tab._lastContentSnapshot = content;
+    _resetIdleTimer(tab);
+  }
+
   void _resetIdleTimer(_TerminalTab tab) {
     tab._idleTimer?.cancel();
     // 出力が来た → まだ動いてるのでidle通知をリセット
@@ -482,15 +504,18 @@ class _TerminalScreenState extends State<TerminalScreen>
       // 再接続直後10秒はスキップ（tmux再描画後の誤通知防止）
       if (tab._connectedAt == null ||
           DateTime.now().difference(tab._connectedAt!).inSeconds < 10) {
+        debugPrint('[idle] skipped: cooldown (connectedAt=${tab._connectedAt})');
         return;
       }
       final isCurrentTab = _tabs.indexOf(tab) == _currentIndex;
       final shouldNotify = tab.connected &&
           !tab._intentionallyClosed &&
           (_isInBackground || !isCurrentTab);
+      debugPrint('[idle] timer fired: bg=$_isInBackground, currentTab=$isCurrentTab, connected=${tab.connected}, intentionallyClosed=${tab._intentionallyClosed} → notify=$shouldNotify');
       if (shouldNotify) {
         tab._idleNotified = true;
         final lastLine = _getLastVisibleLine(tab);
+        debugPrint('[idle] showing notification: "$lastLine"');
         NotificationService.showIdle(
           tabId: tab.notificationId,
           sessionName: tab.sessionName,
@@ -1104,28 +1129,6 @@ class _TerminalScreenState extends State<TerminalScreen>
         top: false,
         child: Row(
           children: [
-            Expanded(
-              child: SingleChildScrollView(
-                scrollDirection: Axis.horizontal,
-                child: Row(
-                  children: [
-                    _keyButton('Esc', () => _sendKey('\x1b')),
-                    _divider(),
-                    _keyButton('↑', () => _sendKey('\x1b[A')),
-                    _keyButton('↓', () => _sendKey('\x1b[B')),
-                    _keyButton('←', () => _sendKey('\x1b[D')),
-                    _keyButton('→', () => _sendKey('\x1b[C')),
-                    _divider(),
-                    _keyButton('Enter', () => _sendKey('\r')),
-                    _keyButton('\\\u23CE', () => _sendKey('\\\r')),
-                    _divider(),
-                    _keyButton('Copy', _copySelection),
-                    _keyButton('Paste', _pasteClipboard),
-                  ],
-                ),
-              ),
-            ),
-            _divider(),
             Builder(builder: (context) {
               final keyboardVisible = MediaQuery.of(context).viewInsets.bottom > 0;
               return Padding(
@@ -1156,6 +1159,27 @@ class _TerminalScreenState extends State<TerminalScreen>
                 ),
               );
             }),
+            _divider(),
+            Expanded(
+              child: SingleChildScrollView(
+                scrollDirection: Axis.horizontal,
+                child: Row(
+                  children: [
+                    _keyButton('Esc', () => _sendKey('\x1b')),
+                    _keyButton('Tab', () => _sendKey('\t')),
+                    _divider(),
+                    _keyButton('↑', () => _sendKey('\x1b[A')),
+                    _keyButton('↓', () => _sendKey('\x1b[B')),
+                    _divider(),
+                    _keyButton('Enter', () => _sendKey('\r')),
+                    _keyButton('\\\u23CE', () => _sendKey('\\\r')),
+                    _divider(),
+                    _keyButton('Copy', _copySelection),
+                    _keyButton('Paste', _pasteClipboard),
+                  ],
+                ),
+              ),
+            ),
             const SizedBox(width: 2),
           ],
         ),

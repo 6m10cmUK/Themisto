@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'package:flutter/foundation.dart';
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 
 class NotificationService {
@@ -23,10 +24,11 @@ class NotificationService {
       },
     );
     // Android 13+ の通知パーミッション要求
-    await _plugin
+    final granted = await _plugin
         .resolvePlatformSpecificImplementation<
             AndroidFlutterLocalNotificationsPlugin>()
         ?.requestNotificationsPermission();
+    debugPrint('[notification] init done, permission granted=$granted');
     _initialized = true;
   }
 
@@ -49,6 +51,7 @@ class NotificationService {
     );
     const details = NotificationDetails(android: channel);
     final body = lastLine.isNotEmpty ? lastLine : '入力待ち';
+    debugPrint('[notification] showIdle: id=$tabId, title=$hostLabel - $sessionName, body=$body');
     await _plugin.show(
       id: tabId,
       title: '$hostLabel - $sessionName',
