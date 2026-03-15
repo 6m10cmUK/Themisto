@@ -2,7 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../providers/providers.dart';
 import 'host_edit_screen.dart';
-import 'session_list_screen.dart';
+import 'terminal_screen.dart';
 
 class HostListScreen extends ConsumerWidget {
   const HostListScreen({super.key});
@@ -37,7 +37,7 @@ class HostListScreen extends ConsumerWidget {
                 onTap: () => Navigator.push(
                   context,
                   MaterialPageRoute(
-                    builder: (_) => SessionListScreen(host: host),
+                    builder: (_) => TerminalScreen(host: host),
                   ),
                 ),
                 trailing: Row(

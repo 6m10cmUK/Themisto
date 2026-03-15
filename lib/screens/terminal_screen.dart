@@ -60,12 +60,12 @@ class _TerminalTab {
 
 class TerminalScreen extends StatefulWidget {
   final HostConfig host;
-  final String sessionName;
+  final String? sessionName;
 
   const TerminalScreen({
     super.key,
     required this.host,
-    required this.sessionName,
+    this.sessionName,
   });
 
   @override
@@ -98,7 +98,13 @@ class _TerminalScreenState extends State<TerminalScreen>
     WidgetsBinding.instance.addObserver(this);
     NotificationService.init();
     _notificationTapSub = NotificationService.onTap.listen(_onNotificationTap);
-    _addTab(widget.sessionName);
+    if (widget.sessionName != null) {
+      _addTab(widget.sessionName!);
+    } else {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted) _showAddTabDialog();
+      });
+    }
     _startWatchdog();
   }
 
@@ -417,7 +423,7 @@ class _TerminalScreenState extends State<TerminalScreen>
     });
     if (_tabs.isEmpty) {
       WidgetsBinding.instance.addPostFrameCallback((_) {
-        if (mounted) Navigator.pop(context);
+        if (mounted) _showAddTabDialog();
       });
     }
   }
