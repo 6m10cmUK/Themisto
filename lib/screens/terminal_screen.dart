@@ -444,27 +444,49 @@ class _TerminalScreenState extends State<TerminalScreen>
 
     if (!mounted) return;
 
-    final selected = await showModalBottomSheet<String>(
+    final selected = await showGeneralDialog<String>(
       context: context,
-      builder: (ctx) => Column(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          const Padding(
-            padding: EdgeInsets.all(16),
-            child: Text('Open session', style: TextStyle(fontSize: 18)),
-          ),
-          if (available.isEmpty)
-            const Padding(
-              padding: EdgeInsets.all(16),
-              child: Text('No other sessions available'),
+      barrierDismissible: true,
+      barrierLabel: 'dismiss',
+      barrierColor: Colors.black54,
+      transitionDuration: const Duration(milliseconds: 200),
+      pageBuilder: (ctx, _, __) => Align(
+        alignment: Alignment.centerRight,
+        child: Material(
+          color: Theme.of(ctx).colorScheme.surface,
+          child: SafeArea(
+            child: SizedBox(
+              width: 280,
+              child: Column(
+                children: [
+                  const Padding(
+                    padding: EdgeInsets.all(16),
+                    child: Text('Open session', style: TextStyle(fontSize: 18)),
+                  ),
+                  const Divider(height: 1),
+                  Expanded(
+                    child: available.isEmpty
+                        ? const Center(child: Text('No other sessions available'))
+                        : ListView(
+                            children: available
+                                .map((name) => ListTile(
+                                      leading: const Icon(Icons.terminal),
+                                      title: Text(name),
+                                      onTap: () => Navigator.pop(ctx, name),
+                                    ))
+                                .toList(),
+                          ),
+                  ),
+                ],
+              ),
             ),
-          ...available.map((name) => ListTile(
-                leading: const Icon(Icons.terminal),
-                title: Text(name),
-                onTap: () => Navigator.pop(ctx, name),
-              )),
-          const SizedBox(height: 16),
-        ],
+          ),
+        ),
+      ),
+      transitionBuilder: (ctx, anim, _, child) => SlideTransition(
+        position: Tween<Offset>(begin: const Offset(1, 0), end: Offset.zero)
+            .animate(CurvedAnimation(parent: anim, curve: Curves.easeOut)),
+        child: child,
       ),
     );
 
