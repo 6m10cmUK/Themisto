@@ -7,25 +7,22 @@ class HostStorageService {
   final FlutterSecureStorage _storage;
 
   HostStorageService({FlutterSecureStorage? storage})
-      : _storage = storage ?? const FlutterSecureStorage();
+      : _storage = storage ??
+            const FlutterSecureStorage(
+              aOptions: AndroidOptions(resetOnError: true),
+            );
 
   Future<List<HostConfig>> getAll() async {
-    try {
-      final raw = await _storage.read(key: _hostsKey);
-      if (raw == null) return [];
-      final list = jsonDecode(raw) as List;
-      final hosts =
-          list.map((e) => HostConfig.fromJson(e as Map<String, dynamic>)).toList();
-      for (final h in hosts) {
-        h.password = await _storage.read(key: 'password_${h.id}');
-        h.privateKey = await _storage.read(key: 'privateKey_${h.id}');
-      }
-      return hosts;
-    } catch (_) {
-      // 署名変更や再インストール後の復号エラー → ストレージをリセット
-      await _storage.deleteAll();
-      return [];
+    final raw = await _storage.read(key: _hostsKey);
+    if (raw == null) return [];
+    final list = jsonDecode(raw) as List;
+    final hosts =
+        list.map((e) => HostConfig.fromJson(e as Map<String, dynamic>)).toList();
+    for (final h in hosts) {
+      h.password = await _storage.read(key: 'password_${h.id}');
+      h.privateKey = await _storage.read(key: 'privateKey_${h.id}');
     }
+    return hosts;
   }
 
   Future<void> save(HostConfig host) async {
