@@ -1,5 +1,6 @@
 import 'package:dartssh2/dartssh2.dart';
 import '../models/host_config.dart';
+import '../models/tmux_window.dart';
 
 class SshService {
   static const pathPrefix =
@@ -56,5 +57,47 @@ class SshService {
   Future<void> killSession(SSHClient client, String name) async {
     final safeName = sanitizeSessionName(name);
     await client.run('$pathPrefix && tmux kill-session -t $safeName');
+  }
+
+  Future<List<TmuxWindow>> listTmuxWindows(SSHClient client, String sessionName) async {
+    final safe = sanitizeSessionName(sessionName);
+    try {
+      final result = await client.run(
+        '$pathPrefix && tmux list-windows -t $safe -F "#{window_index}|#{window_name}|#{window_active}" 2>&1',
+      );
+      final output = String.fromCharCodes(result).trim();
+      if (output.isEmpty || output.startsWith('can\'t find') || output.startsWith('no server')) {
+        return [];
+      }
+      return output
+          .split('\n')
+          .where((l) => l.contains('|'))
+          .map((l) {
+            final parts = l.split('|');
+            if (parts.length < 3) return null;
+            final index = int.tryParse(parts[0]);
+            if (index == null) return null;
+            return TmuxWindow(
+              sessionName: sessionName,
+              index: index,
+              name: parts[1],
+              isActive: parts[2].trim() == '1',
+            );
+          })
+          .whereType<TmuxWindow>()
+          .toList();
+    } catch (_) {
+      return [];
+    }
+  }
+
+  Future<void> createTmuxWindow(SSHClient client, String sessionName) async {
+    final safe = sanitizeSessionName(sessionName);
+    await client.run('$pathPrefix && tmux new-window -t $safe');
+  }
+
+  Future<void> killTmuxWindow(SSHClient client, String sessionName, int windowIndex) async {
+    final safe = sanitizeSessionName(sessionName);
+    await client.run('$pathPrefix && tmux kill-window -t $safe:$windowIndex');
   }
 }

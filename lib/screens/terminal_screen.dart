@@ -12,8 +12,10 @@ import '../models/host_config.dart';
 import '../services/command_history_service.dart';
 import '../services/notification_service.dart';
 import '../services/ssh_service.dart';
+import '../services/tab_state_service.dart';
 import '../widgets/split_view.dart';
 import 'package:xterm/suggestion.dart';
+import '../models/tmux_window.dart';
 
 final _isDesktop = defaultTargetPlatform == TargetPlatform.windows ||
     defaultTargetPlatform == TargetPlatform.macOS ||
@@ -31,6 +33,7 @@ int _nextNotificationId = 0;
 
 class _TerminalTab {
   final String sessionName;
+  int? windowIndex; // null = アクティブウィンドウ
   final Terminal terminal;
   final TerminalController controller;
   SSHSession? session;
@@ -53,7 +56,7 @@ class _TerminalTab {
   DateTime? _connectedAt;
   String _lastContentSnapshot = '';
 
-  _TerminalTab({required this.sessionName})
+  _TerminalTab({required this.sessionName, this.windowIndex})
       : terminal = Terminal(maxLines: _kMaxLines),
         controller = TerminalController();
 }
@@ -102,7 +105,7 @@ class _TerminalScreenState extends State<TerminalScreen>
       _addTab(widget.sessionName!);
     } else {
       WidgetsBinding.instance.addPostFrameCallback((_) {
-        if (mounted) _showAddTabDialog();
+        if (mounted) _restoreOrShowPanel();
       });
     }
     _startWatchdog();
@@ -146,7 +149,6 @@ class _TerminalScreenState extends State<TerminalScreen>
     try {
       await _sharedClient!.ping().timeout(const Duration(seconds: 5));
     } catch (_) {
-      // ping失敗 = 接続死んでる
       _sharedClient?.close();
       _sharedClient = null;
       for (final tab in _tabs) {
@@ -279,14 +281,14 @@ class _TerminalScreenState extends State<TerminalScreen>
     }
   }
 
-  void _addTab(String sessionName) {
+  void _addTab(String sessionName, {int? windowIndex}) {
     if (!_kSessionNamePattern.hasMatch(sessionName)) {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(content: Text('無効なセッション名')),
       );
       return;
     }
-    final tab = _TerminalTab(sessionName: sessionName);
+    final tab = _TerminalTab(sessionName: sessionName, windowIndex: windowIndex);
     setState(() {
       _tabs.add(tab);
       _currentIndex = _tabs.length - 1;
@@ -295,6 +297,7 @@ class _TerminalScreenState extends State<TerminalScreen>
       }
     });
     _connectTab(tab);
+    _saveTabState();
   }
 
   Future<void> _connectTab(_TerminalTab tab) async {
@@ -308,8 +311,11 @@ class _TerminalScreenState extends State<TerminalScreen>
         ),
       );
 
+      final target = tab.windowIndex != null
+          ? '${SshService.sanitizeSessionName(tab.sessionName)}:${tab.windowIndex}'
+          : SshService.sanitizeSessionName(tab.sessionName);
       tab.session!.write(Uint8List.fromList(
-        "${SshService.pathPrefix} && tmux set -g mouse on 2>/dev/null; tmux -u attach-session -t ${SshService.sanitizeSessionName(tab.sessionName)}\n"
+        "${SshService.pathPrefix} && tmux set -g mouse on 2>/dev/null; tmux -u attach-session -t $target\n"
             .codeUnits,
       ));
 
@@ -426,6 +432,29 @@ class _TerminalScreenState extends State<TerminalScreen>
         if (mounted) _showAddTabDialog();
       });
     }
+    _saveTabState();
+  }
+
+  Future<void> _restoreOrShowPanel() async {
+    final saved = await TabStateService.load(widget.host.id);
+    if (!mounted) return;
+    if (saved.isEmpty) {
+      _showAddTabDialog();
+      return;
+    }
+    for (final id in saved) {
+      _addTab(id.sessionName, windowIndex: id.windowIndex);
+    }
+  }
+
+  void _saveTabState() {
+    unawaited(TabStateService.save(
+      widget.host.id,
+      _tabs.map((t) => TabIdentifier(
+        sessionName: t.sessionName,
+        windowIndex: t.windowIndex,
+      )).toList(),
+    ));
   }
 
   Future<void> _showAddTabDialog() async {
@@ -444,50 +473,23 @@ class _TerminalScreenState extends State<TerminalScreen>
       return;
     }
 
-    // Filter out already opened sessions
     final openNames = _tabs.map((t) => t.sessionName).toSet();
-    final available = sessions.where((s) => !openNames.contains(s)).toList();
+    // 既に開いてるセッションも表示（ウィンドウ選択のため）
+    final allSessions = sessions;
 
     if (!mounted) return;
 
-    final selected = await showGeneralDialog<String>(
+    final result = await showGeneralDialog<({String session, int? windowIndex})>(
       context: context,
       barrierDismissible: true,
       barrierLabel: 'dismiss',
       barrierColor: Colors.black54,
       transitionDuration: const Duration(milliseconds: 200),
-      pageBuilder: (ctx, _, __) => Align(
-        alignment: Alignment.centerRight,
-        child: Material(
-          color: Theme.of(ctx).colorScheme.surface,
-          child: SafeArea(
-            child: SizedBox(
-              width: 280,
-              child: Column(
-                children: [
-                  const Padding(
-                    padding: EdgeInsets.all(16),
-                    child: Text('Open session', style: TextStyle(fontSize: 18)),
-                  ),
-                  const Divider(height: 1),
-                  Expanded(
-                    child: available.isEmpty
-                        ? const Center(child: Text('No other sessions available'))
-                        : ListView(
-                            children: available
-                                .map((name) => ListTile(
-                                      leading: const Icon(Icons.terminal),
-                                      title: Text(name),
-                                      onTap: () => Navigator.pop(ctx, name),
-                                    ))
-                                .toList(),
-                          ),
-                  ),
-                ],
-              ),
-            ),
-          ),
-        ),
+      pageBuilder: (ctx, anim, secondaryAnimation) => _SessionSelectorPanel(
+        sessions: allSessions,
+        openSessionNames: openNames,
+        ssh: ssh,
+        getClient: _getClient,
       ),
       transitionBuilder: (ctx, anim, _, child) => SlideTransition(
         position: Tween<Offset>(begin: const Offset(1, 0), end: Offset.zero)
@@ -496,8 +498,8 @@ class _TerminalScreenState extends State<TerminalScreen>
       ),
     );
 
-    if (selected != null) {
-      _addTab(selected);
+    if (result != null) {
+      _addTab(result.session, windowIndex: result.windowIndex);
     }
   }
 
@@ -664,7 +666,9 @@ class _TerminalScreenState extends State<TerminalScreen>
                       mainAxisSize: MainAxisSize.min,
                       children: [
                         Text(
-                          tab.sessionName,
+                          tab.windowIndex != null
+                              ? '${tab.sessionName}[${tab.windowIndex}]'
+                              : tab.sessionName,
                           style: TextStyle(
                             fontSize: 13,
                             fontWeight: selected
@@ -710,7 +714,10 @@ class _TerminalScreenState extends State<TerminalScreen>
                         color: Theme.of(context).colorScheme.surface,
                         borderRadius: BorderRadius.circular(6),
                       ),
-                      child: Text(tab.sessionName,
+                      child: Text(
+                          tab.windowIndex != null
+                              ? '${tab.sessionName}[${tab.windowIndex}]'
+                              : tab.sessionName,
                           style: const TextStyle(fontSize: 13)),
                     ),
                   ),
@@ -1257,6 +1264,224 @@ class _TerminalScreenState extends State<TerminalScreen>
       height: 24,
       margin: const EdgeInsets.symmetric(horizontal: 4),
       color: Theme.of(context).colorScheme.outline.withAlpha(80),
+    );
+  }
+}
+
+class _SessionSelectorPanel extends StatefulWidget {
+  final List<String> sessions;
+  final Set<String> openSessionNames;
+  final SshService ssh;
+  final Future<SSHClient> Function() getClient;
+
+  const _SessionSelectorPanel({
+    required this.sessions,
+    required this.openSessionNames,
+    required this.ssh,
+    required this.getClient,
+  });
+
+  @override
+  State<_SessionSelectorPanel> createState() => _SessionSelectorPanelState();
+}
+
+class _SessionSelectorPanelState extends State<_SessionSelectorPanel> {
+  // セッション名 → ウィンドウリスト(null=未ロード)
+  final Map<String, List<TmuxWindow>?> _windowsCache = {};
+  final Set<String> _expanding = {};
+  final Set<String> _expanded = {}; // 展開状態（ロードと分離）
+
+  @override
+  void initState() {
+    super.initState();
+    // 全セッションのウィンドウ数を並列先読み
+    for (final s in widget.sessions) {
+      _loadWindows(s);
+    }
+  }
+
+  Future<void> _loadWindows(String sessionName) async {
+    if (_windowsCache.containsKey(sessionName)) return;
+    setState(() => _expanding.add(sessionName));
+    try {
+      final client = await widget.getClient();
+      final windows = await widget.ssh.listTmuxWindows(client, sessionName);
+      if (mounted) {
+        setState(() {
+          _windowsCache[sessionName] = windows;
+          _expanding.remove(sessionName);
+        });
+      }
+    } catch (_) {
+      if (mounted) {
+        setState(() {
+          _windowsCache[sessionName] = [];
+          _expanding.remove(sessionName);
+        });
+      }
+    }
+  }
+
+  Future<void> _createWindow(String sessionName) async {
+    try {
+      final client = await widget.getClient();
+      await widget.ssh.createTmuxWindow(client, sessionName);
+      // キャッシュを無効化して再ロード
+      setState(() => _windowsCache.remove(sessionName));
+      await _loadWindows(sessionName);
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context)
+            .showSnackBar(SnackBar(content: Text('Error: $e')));
+      }
+    }
+  }
+
+  Future<void> _killWindow(String sessionName, int windowIndex) async {
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Kill window?'),
+        content: Text('Kill window $windowIndex of "$sessionName"?'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text('Cancel'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            child: const Text('Kill'),
+          ),
+        ],
+      ),
+    );
+    if (ok != true) return;
+    try {
+      final client = await widget.getClient();
+      await widget.ssh.killTmuxWindow(client, sessionName, windowIndex);
+      setState(() => _windowsCache.remove(sessionName));
+      await _loadWindows(sessionName);
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context)
+            .showSnackBar(SnackBar(content: Text('Error: $e')));
+      }
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Align(
+      alignment: Alignment.centerRight,
+      child: Material(
+        color: Theme.of(context).colorScheme.surface,
+        child: SafeArea(
+          child: SizedBox(
+            width: 280,
+            child: Column(
+              children: [
+                const Padding(
+                  padding: EdgeInsets.all(16),
+                  child: Text('Open session', style: TextStyle(fontSize: 18)),
+                ),
+                const Divider(height: 1),
+                Expanded(
+                  child: widget.sessions.isEmpty
+                      ? const Center(child: Text('No sessions available'))
+                      : ListView.builder(
+                          itemCount: widget.sessions.length,
+                          itemBuilder: (ctx, i) {
+                            final name = widget.sessions[i];
+                            final windows = _windowsCache[name];
+                            final isExpanding = _expanding.contains(name);
+                            final isExpanded = _expanded.contains(name);
+
+                            return Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                ListTile(
+                                  leading: const Icon(Icons.terminal),
+                                  title: Text(name),
+                                  subtitle: isExpanding
+                                      ? const Text('...')
+                                      : windows != null
+                                          ? Text('${windows.length} window${windows.length == 1 ? '' : 's'}')
+                                          : null,
+                                  trailing: Row(
+                                    mainAxisSize: MainAxisSize.min,
+                                    children: [
+                                      if (isExpanding)
+                                        const SizedBox(
+                                          width: 16,
+                                          height: 16,
+                                          child: CircularProgressIndicator(strokeWidth: 2),
+                                        )
+                                      else if (windows != null)
+                                        IconButton(
+                                          icon: Icon(
+                                            isExpanded
+                                                ? Icons.expand_less
+                                                : Icons.expand_more,
+                                            size: 20,
+                                          ),
+                                          onPressed: () {
+                                            setState(() {
+                                              if (isExpanded) {
+                                                _expanded.remove(name);
+                                              } else {
+                                                _expanded.add(name);
+                                              }
+                                            });
+                                          },
+                                        ),
+                                    ],
+                                  ),
+                                  onTap: () {
+                                    // ウィンドウ未ロードの場合はアクティブウィンドウで接続
+                                    Navigator.pop(
+                                      ctx,
+                                      (session: name, windowIndex: null),
+                                    );
+                                  },
+                                ),
+                                if (isExpanded && windows != null) ...[
+                                  ...windows.map((w) => ListTile(
+                                        contentPadding: const EdgeInsets.only(left: 40, right: 8),
+                                        leading: Icon(
+                                          w.isActive
+                                              ? Icons.radio_button_checked
+                                              : Icons.radio_button_unchecked,
+                                          size: 16,
+                                        ),
+                                        title: Text(w.displayName),
+                                        subtitle: Text('Window ${w.index}'),
+                                        trailing: IconButton(
+                                          icon: const Icon(Icons.close, size: 16),
+                                          onPressed: () => _killWindow(name, w.index),
+                                        ),
+                                        onTap: () => Navigator.pop(
+                                          ctx,
+                                          (session: name, windowIndex: w.index),
+                                        ),
+                                      )),
+                                  ListTile(
+                                    contentPadding: const EdgeInsets.only(left: 40, right: 8),
+                                    leading: const Icon(Icons.add, size: 16),
+                                    title: const Text('New window'),
+                                    onTap: () => _createWindow(name),
+                                  ),
+                                ],
+                                const Divider(height: 1),
+                              ],
+                            );
+                          },
+                        ),
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
     );
   }
 }
