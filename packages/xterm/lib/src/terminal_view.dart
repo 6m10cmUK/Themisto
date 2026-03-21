@@ -380,7 +380,15 @@ class TerminalViewState extends State<TerminalView> {
     final consumed = key == null ? false : widget.terminal.keyInput(key);
 
     if (!consumed) {
-      widget.terminal.textInput(text);
+      // Multi-character or newline-containing input is treated as a paste
+      // (e.g. from right-click paste or IME commit of multi-char text).
+      // Use terminal.paste() so bracketed paste mode is respected when the
+      // remote application has enabled it (e.g. PowerShell / PSReadLine).
+      if (text.length > 1 || text.contains('\n')) {
+        widget.terminal.paste(text);
+      } else {
+        widget.terminal.textInput(text);
+      }
     }
 
     _scrollToBottom();

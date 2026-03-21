@@ -11,7 +11,7 @@ import 'package:xterm/xterm.dart';
 import '../models/host_config.dart';
 import '../services/command_history_service.dart';
 import '../services/ssh_service.dart';
-import '../widgets/split_view.dart';
+import '../widgets/dock_view.dart';
 import 'package:xterm/suggestion.dart';
 
 final _isDesktop = defaultTargetPlatform == TargetPlatform.windows ||
@@ -47,12 +47,12 @@ class _TerminalTab {
 
 class TerminalScreen extends StatefulWidget {
   final HostConfig host;
-  final String sessionName;
+  final String? sessionName;
 
   const TerminalScreen({
     super.key,
     required this.host,
-    required this.sessionName,
+    this.sessionName,
   });
 
   @override
@@ -66,8 +66,14 @@ class _TerminalScreenState extends State<TerminalScreen>
   bool _ctrlHeld = false;
   SSHClient? _sharedClient;
   Completer<SSHClient>? _connectingClient;
-  SplitViewController? _splitController;
+  DockViewController? _dockController;
   _TerminalTab get _currentTab => _tabs[_currentIndex];
+
+  // Sidebar
+  bool _sidebarOpen = false;
+  double _sidebarWidth = 220;
+  List<String> _sidebarSessions = [];
+  bool _sidebarLoading = false;
 
   // Autocomplete
   late final _historyService = CommandHistoryService(hostId: widget.host.id);
@@ -80,7 +86,17 @@ class _TerminalScreenState extends State<TerminalScreen>
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
-    _addTab(widget.sessionName);
+    if (widget.sessionName != null) {
+      _addTab(widget.sessionName!);
+      if (_isDesktop) {
+        _sidebarOpen = true;
+        _loadSidebarSessions();
+      }
+    } else {
+      // Desktop: open with sidebar, no initial tab
+      _sidebarOpen = true;
+      _loadSidebarSessions();
+    }
   }
 
   Future<void> _enableBackground() async {
@@ -190,10 +206,20 @@ class _TerminalScreenState extends State<TerminalScreen>
       _tabs.add(tab);
       _currentIndex = _tabs.length - 1;
       if (_isDesktop) {
-        _splitController ??= SplitViewController(initialTabIndex: 0);
+        if (_dockController == null) {
+          _dockController = DockViewController(initialTabIndex: _currentIndex);
+        } else {
+          final focused = _dockController!.focusedLeaf();
+          if (focused != null) {
+            _dockController!.addTabToLeaf(focused.id, _currentIndex);
+          }
+        }
       }
     });
     _connectTab(tab);
+    if (_isDesktop && _sidebarOpen) {
+      _loadSidebarSessions();
+    }
   }
 
   Future<void> _connectTab(_TerminalTab tab) async {
@@ -249,12 +275,12 @@ class _TerminalScreenState extends State<TerminalScreen>
         }
       });
 
-      setState(() => tab.connected = true);
+      if (mounted) setState(() => tab.connected = true);
       if (!_isDesktop && !FlutterBackground.isBackgroundExecutionEnabled) {
         _enableBackground();
       }
     } catch (e) {
-      setState(() => tab.error = e.toString());
+      if (mounted) setState(() => tab.error = e.toString());
     }
   }
 
@@ -289,15 +315,26 @@ class _TerminalScreenState extends State<TerminalScreen>
     tab.session?.close();
     tab.focusNode.dispose();
     setState(() {
-      _splitController?.removeTabFromAll(index);
+      _dockController?.closeTab(index);
       _tabs.removeAt(index);
-      if (index < _currentIndex) {
-        _currentIndex--;
-      } else if (_currentIndex >= _tabs.length) {
-        _currentIndex = _tabs.isEmpty ? 0 : _tabs.length - 1;
+      if (_tabs.isEmpty) {
+        _dockController = null;
+        _currentIndex = 0;
+      } else {
+        if (index < _currentIndex) {
+          _currentIndex--;
+        } else if (_currentIndex >= _tabs.length) {
+          _currentIndex = _tabs.length - 1;
+        }
+        if (_isDesktop && _dockController != null) {
+          final focused = _dockController!.focusedLeaf();
+          if (focused != null && focused.tabIndices.isNotEmpty) {
+            _currentIndex = focused.activeTabIndex;
+          }
+        }
       }
     });
-    if (_tabs.isEmpty) {
+    if (_tabs.isEmpty && !_isDesktop) {
       WidgetsBinding.instance.addPostFrameCallback((_) {
         if (mounted) Navigator.pop(context);
       });
@@ -326,33 +363,190 @@ class _TerminalScreenState extends State<TerminalScreen>
 
     if (!mounted) return;
 
-    final selected = await showModalBottomSheet<String>(
-      context: context,
-      builder: (ctx) => Column(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          const Padding(
-            padding: EdgeInsets.all(16),
-            child: Text('Open session', style: TextStyle(fontSize: 18)),
-          ),
-          if (available.isEmpty)
+    final String? selected;
+    if (_isDesktop) {
+      selected = await showDialog<String>(
+        context: context,
+        builder: (ctx) => SimpleDialog(
+          title: const Text('Open session'),
+          children: [
+            if (available.isEmpty)
+              const Padding(
+                padding: EdgeInsets.all(16),
+                child: Text('No other sessions available'),
+              ),
+            ...available.map((name) => SimpleDialogOption(
+                  onPressed: () => Navigator.pop(ctx, name),
+                  child: Row(
+                    children: [
+                      const Icon(Icons.terminal, size: 20),
+                      const SizedBox(width: 12),
+                      Text(name),
+                    ],
+                  ),
+                )),
+          ],
+        ),
+      );
+    } else {
+      selected = await showModalBottomSheet<String>(
+        context: context,
+        builder: (ctx) => Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
             const Padding(
               padding: EdgeInsets.all(16),
-              child: Text('No other sessions available'),
+              child: Text('Open session', style: TextStyle(fontSize: 18)),
             ),
-          ...available.map((name) => ListTile(
-                leading: const Icon(Icons.terminal),
-                title: Text(name),
-                onTap: () => Navigator.pop(ctx, name),
-              )),
-          const SizedBox(height: 16),
-        ],
-      ),
-    );
+            if (available.isEmpty)
+              const Padding(
+                padding: EdgeInsets.all(16),
+                child: Text('No other sessions available'),
+              ),
+            ...available.map((name) => ListTile(
+                  leading: const Icon(Icons.terminal),
+                  title: Text(name),
+                  onTap: () => Navigator.pop(ctx, name),
+                )),
+            const SizedBox(height: 16),
+          ],
+        ),
+      );
+    }
 
     if (selected != null) {
       _addTab(selected);
     }
+  }
+
+  Future<void> _loadSidebarSessions() async {
+    setState(() => _sidebarLoading = true);
+    try {
+      final client = await _getClient();
+      final ssh = SshService();
+      final (sessions, _) = await ssh.listTmuxSessions(client);
+      if (mounted) {
+        setState(() {
+          _sidebarSessions = sessions;
+          _sidebarLoading = false;
+        });
+      }
+    } catch (e) {
+      if (mounted) {
+        setState(() => _sidebarLoading = false);
+        ScaffoldMessenger.of(context)
+            .showSnackBar(SnackBar(content: Text('Error loading sessions: $e')));
+      }
+    }
+  }
+
+  Future<void> _sidebarCreateSession() async {
+    final ctrl = TextEditingController();
+    final name = await showDialog<String>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('New tmux session'),
+        content: TextField(
+          controller: ctrl,
+          decoration: const InputDecoration(hintText: 'Session name'),
+          autofocus: true,
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx),
+            child: const Text('Cancel'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, ctrl.text),
+            child: const Text('Create'),
+          ),
+        ],
+      ),
+    );
+    if (name == null || name.isEmpty) return;
+    if (!_kSessionNamePattern.hasMatch(name)) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Invalid session name')),
+      );
+      return;
+    }
+    try {
+      final client = await _getClient();
+      final ssh = SshService();
+      await ssh.createSession(client, name);
+      _loadSidebarSessions();
+      _addTab(name);
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context)
+            .showSnackBar(SnackBar(content: Text('Error: $e')));
+      }
+    }
+  }
+
+  Future<void> _sidebarKillSession(String name) async {
+    final confirm = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Kill session?'),
+        content: Text('Kill "$name"?'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text('Cancel'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            child: const Text('Kill'),
+          ),
+        ],
+      ),
+    );
+    if (confirm != true) return;
+    // Close the tab if open
+    final tabIndex = _tabs.indexWhere((t) => t.sessionName == name);
+    if (tabIndex >= 0) {
+      _closeTab(tabIndex);
+    }
+    try {
+      final client = await _getClient();
+      final ssh = SshService();
+      await ssh.killSession(client, name);
+      _loadSidebarSessions();
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context)
+            .showSnackBar(SnackBar(content: Text('Error: $e')));
+      }
+    }
+  }
+
+  void _sidebarTapSession(String name) {
+    // If tab already open, find its pane and activate it
+    final existingIndex = _tabs.indexWhere((t) => t.sessionName == name);
+    if (existingIndex >= 0) {
+      setState(() {
+        _currentIndex = existingIndex;
+        if (_isDesktop && _dockController != null) {
+          final leaf = _dockController!.findLeafContaining(existingIndex);
+          if (leaf != null) {
+            _dockController!.activateTab(leaf.id, existingIndex);
+          } else {
+            // Tab exists but not in any leaf — add to focused leaf
+            final focused = _dockController!.focusedLeaf();
+            if (focused != null) {
+              _dockController!.addTabToLeaf(focused.id, existingIndex);
+            }
+          }
+        }
+      });
+      if (_isDesktop && _currentIndex < _tabs.length) {
+        _tabs[_currentIndex].focusNode.requestFocus();
+      }
+      return;
+    }
+    // Otherwise open new tab
+    _addTab(name);
   }
 
   void _handleScroll(_TerminalTab tab, double delta) {
@@ -388,24 +582,35 @@ class _TerminalScreenState extends State<TerminalScreen>
 
   @override
   Widget build(BuildContext context) {
-    if (_tabs.isEmpty) return const SizedBox.shrink();
+    if (_tabs.isEmpty && !_isDesktop) return const SizedBox.shrink();
     return SuggestionPortal(
       controller: _suggestionController,
       overlayBuilder: (_) => _buildSuggestionOverlay(),
       child: Scaffold(
         resizeToAvoidBottomInset: false,
-        appBar: AppBar(
-          toolbarHeight: 0,
-          bottom: PreferredSize(
-            preferredSize: const Size.fromHeight(40),
-            child: _buildTabBar(),
-          ),
-        ),
+        appBar: _isDesktop
+            ? null
+            : AppBar(
+                toolbarHeight: 0,
+                bottom: PreferredSize(
+                  preferredSize: const Size.fromHeight(40),
+                  child: _buildTabBar(),
+                ),
+              ),
         body: _buildBody(),
       ),
     );
   }
 
+  void _navigateBack() {
+    for (final tab in _tabs) {
+      tab.session?.close();
+    }
+    _sharedClient?.close();
+    Navigator.pop(context);
+  }
+
+  /// Mobile-only tab bar
   Widget _buildTabBar() {
     return SizedBox(
       height: 40,
@@ -413,24 +618,26 @@ class _TerminalScreenState extends State<TerminalScreen>
         children: [
           IconButton(
             icon: const Icon(Icons.arrow_back, size: 20),
-            onPressed: () {
-              for (final tab in _tabs) {
-                tab.session?.close();
-              }
-              _sharedClient?.close();
-              Navigator.pop(context);
-            },
+            onPressed: _navigateBack,
             padding: EdgeInsets.zero,
             constraints: const BoxConstraints(minWidth: 40),
           ),
           Expanded(
             child: ListView.builder(
               scrollDirection: Axis.horizontal,
-              itemCount: _tabs.length,
+              itemCount: _tabs.length + 1,
               itemBuilder: (context, i) {
+                if (i == _tabs.length) {
+                  return IconButton(
+                    icon: const Icon(Icons.add, size: 20),
+                    onPressed: _showAddTabDialog,
+                    padding: EdgeInsets.zero,
+                    constraints: const BoxConstraints(minWidth: 40),
+                  );
+                }
                 final tab = _tabs[i];
                 final selected = i == _currentIndex;
-                final tabWidget = GestureDetector(
+                return GestureDetector(
                   onTap: () => setState(() => _currentIndex = i),
                   child: Container(
                     padding: const EdgeInsets.symmetric(horizontal: 12),
@@ -482,38 +689,35 @@ class _TerminalScreenState extends State<TerminalScreen>
                     ),
                   ),
                 );
-                if (!_isDesktop) return tabWidget;
-                return Draggable<int>(
-                  data: i,
-                  feedback: Material(
-                    elevation: 4,
-                    borderRadius: BorderRadius.circular(6),
-                    child: Container(
-                      padding: const EdgeInsets.symmetric(
-                          horizontal: 12, vertical: 8),
-                      decoration: BoxDecoration(
-                        color: Theme.of(context).colorScheme.surface,
-                        borderRadius: BorderRadius.circular(6),
-                      ),
-                      child: Text(tab.sessionName,
-                          style: const TextStyle(fontSize: 13)),
-                    ),
-                  ),
-                  childWhenDragging: Opacity(
-                    opacity: 0.4,
-                    child: tabWidget,
-                  ),
-                  child: tabWidget,
-                );
               },
             ),
           ),
+        ],
+      ),
+    );
+  }
+
+  /// Desktop toolbar shown when sidebar is collapsed
+  Widget _buildDesktopToolbar() {
+    return Container(
+      height: 32,
+      color: Theme.of(context).colorScheme.surfaceContainerLow,
+      child: Row(
+        children: [
           IconButton(
-            icon: const Icon(Icons.add, size: 20),
-            onPressed: _showAddTabDialog,
+            icon: const Icon(Icons.menu, size: 18),
+            onPressed: () => setState(() => _sidebarOpen = true),
             padding: EdgeInsets.zero,
-            constraints: const BoxConstraints(minWidth: 40),
+            constraints: const BoxConstraints(minWidth: 32, minHeight: 32),
+            tooltip: 'Show sidebar',
           ),
+          IconButton(
+            icon: const Icon(Icons.arrow_back, size: 18),
+            onPressed: _navigateBack,
+            padding: EdgeInsets.zero,
+            constraints: const BoxConstraints(minWidth: 32, minHeight: 32),
+          ),
+          const Spacer(),
         ],
       ),
     );
@@ -539,9 +743,7 @@ class _TerminalScreenState extends State<TerminalScreen>
     if (_tabs.isEmpty) return;
     final data = await Clipboard.getData(Clipboard.kTextPlain);
     if (data?.text != null && data!.text!.isNotEmpty) {
-      _currentTab.session?.write(
-        Uint8List.fromList(utf8.encode(data.text!)),
-      );
+      _currentTab.terminal.paste(data.text!);
     }
   }
 
@@ -778,26 +980,155 @@ class _TerminalScreenState extends State<TerminalScreen>
     );
   }
 
+  Widget _buildSidebar() {
+    final openNames = _tabs.map((t) => t.sessionName).toSet();
+    return Container(
+      width: _sidebarWidth,
+      decoration: BoxDecoration(
+        color: Theme.of(context).colorScheme.surfaceContainerLow,
+      ),
+      child: Column(
+        children: [
+          // Host header with back + collapse
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 4),
+            child: Row(
+              children: [
+                SizedBox(
+                  width: 32,
+                  height: 32,
+                  child: IconButton(
+                    icon: const Icon(Icons.arrow_back, size: 18),
+                    onPressed: _navigateBack,
+                    padding: EdgeInsets.zero,
+                    tooltip: 'Back to hosts',
+                  ),
+                ),
+                Expanded(
+                  child: Text(
+                    widget.host.label,
+                    style: const TextStyle(
+                      fontSize: 13,
+                      fontWeight: FontWeight.w500,
+                    ),
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                ),
+                SizedBox(
+                  width: 32,
+                  height: 32,
+                  child: IconButton(
+                    icon: const Icon(Icons.chevron_left, size: 18),
+                    onPressed: () => setState(() => _sidebarOpen = false),
+                    padding: EdgeInsets.zero,
+                    tooltip: 'Collapse sidebar',
+                  ),
+                ),
+              ],
+            ),
+          ),
+          const Divider(height: 1),
+          // Sessions header with refresh + add
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+            child: Row(
+              children: [
+                const Expanded(
+                  child: Text(
+                    'Sessions',
+                    style: TextStyle(
+                      fontWeight: FontWeight.bold,
+                      fontSize: 13,
+                      color: Colors.grey,
+                    ),
+                  ),
+                ),
+                SizedBox(
+                  width: 28,
+                  height: 28,
+                  child: IconButton(
+                    icon: const Icon(Icons.refresh, size: 16),
+                    onPressed: _loadSidebarSessions,
+                    padding: EdgeInsets.zero,
+                  ),
+                ),
+                SizedBox(
+                  width: 28,
+                  height: 28,
+                  child: IconButton(
+                    icon: const Icon(Icons.add, size: 16),
+                    onPressed: _sidebarCreateSession,
+                    padding: EdgeInsets.zero,
+                  ),
+                ),
+              ],
+            ),
+          ),
+          // Session list
+          Expanded(
+            child: _sidebarLoading
+                ? const Center(child: CircularProgressIndicator(strokeWidth: 2))
+                : _sidebarSessions.isEmpty
+                    ? const Center(
+                        child: Text(
+                          'No sessions',
+                          style: TextStyle(color: Colors.grey),
+                        ),
+                      )
+                    : ListView.builder(
+                        itemCount: _sidebarSessions.length,
+                        itemBuilder: (context, i) {
+                          final name = _sidebarSessions[i];
+                          final isOpen = openNames.contains(name);
+                          final isActive = _tabs.isNotEmpty &&
+                              _currentIndex < _tabs.length &&
+                              _tabs[_currentIndex].sessionName == name;
+                          return ListTile(
+                            dense: true,
+                            visualDensity: VisualDensity.compact,
+                            leading: Icon(
+                              Icons.terminal,
+                              size: 18,
+                              color: isOpen
+                                  ? Theme.of(context).colorScheme.primary
+                                  : null,
+                            ),
+                            title: Text(
+                              name,
+                              style: TextStyle(
+                                fontSize: 13,
+                                fontWeight:
+                                    isActive ? FontWeight.bold : FontWeight.normal,
+                                color: isOpen
+                                    ? Theme.of(context).colorScheme.primary
+                                    : null,
+                              ),
+                            ),
+                            selected: isActive,
+                            onTap: () => _sidebarTapSession(name),
+                            trailing: SizedBox(
+                              width: 28,
+                              height: 28,
+                              child: IconButton(
+                                icon: const Icon(Icons.delete_outline, size: 16),
+                                onPressed: () => _sidebarKillSession(name),
+                                padding: EdgeInsets.zero,
+                              ),
+                            ),
+                          );
+                        },
+                      ),
+          ),
+        ],
+      ),
+    );
+  }
+
   Widget _buildBody() {
-    if (_isDesktop && _splitController != null) {
-      return SplitView(
-        controller: _splitController!,
-        tabCount: _tabs.length,
-        paneBuilder: (tabIndex, leafId, focused) {
-          return _buildTerminalPane(tabIndex);
-        },
-        onFocusChanged: (leafId) {
-          final leaf = _splitController!.focusedLeaf();
-          if (leaf != null) {
-            setState(() => _currentIndex = leaf.tabIndex);
-          }
-        },
-        onChanged: () => setState(() {}),
-      );
+    if (_isDesktop) {
+      return _buildDesktopLayout();
     }
-
     final terminalView = _buildTerminalPane(_currentIndex);
-
     final keyboardHeight = MediaQuery.of(context).viewInsets.bottom;
     return Transform.translate(
       offset: Offset(0, -keyboardHeight),
@@ -807,6 +1138,78 @@ class _TerminalScreenState extends State<TerminalScreen>
           _buildAccessoryBar(),
         ],
       ),
+    );
+  }
+
+  Widget _buildDesktopLayout() {
+    Widget terminal;
+    if (_dockController != null) {
+      terminal = DockView(
+        controller: _dockController!,
+        tabCount: _tabs.length,
+        tabBuilder: (tabIndex) {
+          if (tabIndex < 0 || tabIndex >= _tabs.length) {
+            return const SizedBox();
+          }
+          return Text(_tabs[tabIndex].sessionName);
+        },
+        paneBuilder: (tabIndex, leafId, focused) {
+          return _buildTerminalPane(tabIndex);
+        },
+        onFocusChanged: (leafId) {
+          final leaf = _dockController!.focusedLeaf();
+          if (leaf != null && leaf.tabIndices.isNotEmpty) {
+            setState(() => _currentIndex = leaf.activeTabIndex);
+            if (_currentIndex >= 0 && _currentIndex < _tabs.length) {
+              _tabs[_currentIndex].focusNode.requestFocus();
+            }
+          }
+        },
+        onTabClosed: (tabIndex) => _closeTab(tabIndex),
+        onTabReloaded: (tabIndex) => _reloadTab(tabIndex),
+        onChanged: () => setState(() {}),
+      );
+    } else {
+      terminal = Container(
+        color: Colors.black,
+        child: const Center(
+          child: Text(
+            'Select a session from the sidebar',
+            style: TextStyle(color: Colors.white54),
+          ),
+        ),
+      );
+    }
+
+    return Row(
+      children: [
+        if (_sidebarOpen) ...[
+          _buildSidebar(),
+          MouseRegion(
+            cursor: SystemMouseCursors.resizeColumn,
+            child: GestureDetector(
+              onHorizontalDragUpdate: (details) {
+                setState(() {
+                  _sidebarWidth = (_sidebarWidth + details.delta.dx)
+                      .clamp(150.0, 400.0);
+                });
+              },
+              child: Container(
+                width: 4,
+                color: Theme.of(context).colorScheme.outlineVariant,
+              ),
+            ),
+          ),
+        ],
+        Expanded(
+          child: Column(
+            children: [
+              if (!_sidebarOpen) _buildDesktopToolbar(),
+              Expanded(child: terminal),
+            ],
+          ),
+        ),
+      ],
     );
   }
 

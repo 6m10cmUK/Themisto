@@ -58,6 +58,7 @@ class CustomTextEdit extends StatefulWidget {
 
 class CustomTextEditState extends State<CustomTextEdit> with TextInputClient {
   TextInputConnection? _connection;
+  bool _stateResetPending = false;
 
   @override
   void initState() {
@@ -126,12 +127,13 @@ class CustomTextEditState extends State<CustomTextEdit> with TextInputClient {
       return;
     }
 
-    _connection?.setEditableSizeAndTransform(
-      rect.size,
-      Matrix4.translationValues(0, 0, 0),
-    );
+    final renderObject = context.findRenderObject();
+    final transform =
+        renderObject?.getTransformTo(null) ?? Matrix4.identity();
 
+    _connection?.setEditableSizeAndTransform(rect.size, transform);
     _connection?.setCaretRect(caretRect);
+    _connection?.setComposingRect(caretRect);
   }
 
   void _onFocusChange() {
@@ -178,6 +180,7 @@ class CustomTextEditState extends State<CustomTextEdit> with TextInputClient {
       _connection!.show();
     } else {
       final config = TextInputConfiguration(
+        viewId: View.of(context).viewId,
         inputType: widget.inputType,
         inputAction: widget.inputAction,
         keyboardAppearance: widget.keyboardAppearance,
@@ -215,6 +218,10 @@ class CustomTextEditState extends State<CustomTextEdit> with TextInputClient {
 
   late var _currentEditingState = _initEditingState.copyWith();
 
+  /// The text that was confirmed just before the last state reset.
+  /// Used to distinguish reset echoes from new content (e.g. paste).
+  String _textBeforeReset = '';
+
   @override
   TextEditingValue? get currentTextEditingValue {
     return _currentEditingState;
@@ -227,6 +234,29 @@ class CustomTextEditState extends State<CustomTextEdit> with TextInputClient {
 
   @override
   void updateEditingValue(TextEditingValue value) {
+    // After we reset the editing state, the platform may echo back the old
+    // confirmed value before processing the reset. Skip such echoes to
+    // prevent duplicate input.
+    if (_stateResetPending) {
+      if (value.text == _initEditingState.text) {
+        // Platform acknowledged the reset.
+        _stateResetPending = false;
+        _currentEditingState = value;
+        return;
+      }
+      if (value.composing.isCollapsed) {
+        if (value.text == _textBeforeReset) {
+          // Echo of previously confirmed text — skip.
+          return;
+        }
+        // New text arrived while reset was pending (e.g. paste) — process it.
+        _stateResetPending = false;
+      } else {
+        // New composing started; reset was implicitly processed.
+        _stateResetPending = false;
+      }
+    }
+
     _currentEditingState = value;
 
     // Get input after composing is done
@@ -246,12 +276,16 @@ class CustomTextEditState extends State<CustomTextEdit> with TextInputClient {
         _initEditingState.text.length,
       );
 
-      widget.onInsert(textDelta);
+      if (textDelta.isNotEmpty) {
+        widget.onInsert(textDelta);
+      }
     }
 
     // Reset editing state if composing is done
     if (_currentEditingState.composing.isCollapsed &&
         _currentEditingState.text != _initEditingState.text) {
+      _textBeforeReset = _currentEditingState.text;
+      _stateResetPending = true;
       _connection!.setEditingState(_initEditingState);
     }
   }

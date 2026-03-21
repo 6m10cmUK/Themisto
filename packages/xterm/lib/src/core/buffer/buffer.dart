@@ -190,7 +190,7 @@ class Buffer {
   /// cursor.
   void eraseLineToCursor() {
     currentLine.isWrapped = false;
-    currentLine.eraseRange(0, _cursorX, terminal.cursor);
+    currentLine.eraseRange(0, _cursorX.clamp(0, viewWidth), terminal.cursor);
   }
 
   /// Erases the line at the current cursor position.
