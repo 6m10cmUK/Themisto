@@ -38,7 +38,7 @@ class _TerminalTab {
   List<StreamSubscription> subscriptions = [];
   Offset? _lastPointerPosition;
 
-  final FocusNode focusNode = FocusNode();
+  final GlobalKey terminalKey = GlobalKey();
 
   _TerminalTab({required this.sessionName})
       : terminal = Terminal(maxLines: _kMaxLines),
@@ -313,7 +313,6 @@ class _TerminalScreenState extends State<TerminalScreen>
     }
     tab.subscriptions.clear();
     tab.session?.close();
-    tab.focusNode.dispose();
     setState(() {
       _dockController?.closeTab(index);
       _tabs.removeAt(index);
@@ -573,8 +572,7 @@ class _TerminalScreenState extends State<TerminalScreen>
       }
       tab.subscriptions.clear();
       tab.session?.close();
-      tab.focusNode.dispose();
-    }
+      }
     _sharedClient?.close();
     _debounceTimer?.cancel();
     super.dispose();
@@ -812,7 +810,7 @@ class _TerminalScreenState extends State<TerminalScreen>
     final cursorX = buffer.cursorX;
     final cursorY = buffer.cursorY;
     // Approximate cell size (will be close enough for overlay positioning)
-    final renderBox = tab.focusNode.context?.findRenderObject() as RenderBox?;
+    final renderBox = tab.terminalKey.currentContext?.findRenderObject() as RenderBox?;
     if (renderBox == null) return;
     final size = renderBox.size;
     final cellWidth = size.width / tab.terminal.viewWidth;
@@ -966,8 +964,8 @@ class _TerminalScreenState extends State<TerminalScreen>
       },
       child: TerminalView(
         tab.terminal,
+        key: tab.terminalKey,
         controller: tab.controller,
-        focusNode: tab.focusNode,
         autofocus: true,
         deleteDetection: !_isDesktop,
         keyboardType: _isDesktop ? TextInputType.text : TextInputType.emailAddress,
@@ -1256,7 +1254,11 @@ class _TerminalScreenState extends State<TerminalScreen>
                       } else {
                         // Re-focus the terminal to open the keyboard
                         final tab = _tabs[_currentIndex];
-                        tab.focusNode.requestFocus();
+                        // Re-focus terminal to open keyboard
+                        final context = tab.terminalKey.currentContext;
+                        if (context != null) {
+                          FocusScope.of(context).requestFocus();
+                        }
                       }
                     },
                     child: Container(
